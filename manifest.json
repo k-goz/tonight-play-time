@@ -1,0 +1,26 @@
+{
+  "name": "今晚还能玩多久",
+  "short_name": "还能玩多久",
+  "description": "亲子时间管理工具 - 帮助小朋友管理写作业到睡觉前的时间",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F3E8FF",
+  "theme_color": "#7C5CFC",
+  "lang": "zh-CN",
+  "categories": ["education", "lifestyle"],
+  "icons": [
+    {
+      "src": "icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

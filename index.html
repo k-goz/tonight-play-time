@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="theme-color" content="#7C5CFC">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="今晚还能玩多久">
+  <meta name="description" content="亲子时间管理工具 - 帮助小朋友管理写作业到睡觉前的时间">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <title>今晚还能玩多久</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- ========== 今日作业页面 ========== -->
+    <div id="page-timer" class="page active">
+      <!-- 顶部信息栏 -->
+      <header class="header">
+        <div class="header-left">
+          <span class="app-title">🌙 今晚还能玩多久</span>
+        </div>
+        <div class="header-right">
+          <button id="btn-stats" class="btn-icon" title="家长数据">📊</button>
+        </div>
+      </header>
+
+      <!-- 时间信息 -->
+      <div class="time-info">
+        <div class="current-time" id="current-time">--:--:--</div>
+        <div class="date-display" id="date-display">----年--月--日 星期-</div>
+        <div class="bedtime-info">💤 睡觉时间：晚上 9:30</div>
+      </div>
+
+      <!-- 进度区域 -->
+      <div class="progress-section" id="progress-section">
+        <!-- 作业时间卡片 -->
+        <div class="time-card homework-card">
+          <div class="card-emoji">📝</div>
+          <div class="card-label">已经努力</div>
+          <div class="card-time" id="homework-time">0 分钟</div>
+          <div class="card-sublabel">作业时间</div>
+        </div>
+
+        <!-- 中间分隔 -->
+        <div class="progress-divider">
+          <div class="divider-rocket" id="divider-rocket">🚀</div>
+        </div>
+
+        <!-- 快乐时间卡片 -->
+        <div class="time-card happy-card">
+          <div class="card-emoji" id="happy-emoji">🌈</div>
+          <div class="card-label" id="happy-label">还可以拥有</div>
+          <div class="card-time" id="happy-time">-- 分钟</div>
+          <div class="card-sublabel" id="happy-sublabel">快乐时间</div>
+        </div>
+      </div>
+
+      <!-- 进度条 -->
+      <div class="progress-bar-container">
+        <div class="progress-bar">
+          <div class="progress-homework" id="progress-homework"></div>
+          <div class="progress-happy" id="progress-happy"></div>
+          <div class="progress-rocket" id="progress-rocket">🚀</div>
+        </div>
+        <div class="progress-labels">
+          <span>作业时间</span>
+          <span>快乐时间</span>
+        </div>
+      </div>
+
+      <!-- 鼓励文案 -->
+      <div class="encouragement" id="encouragement">
+        点击下方按钮，开始今天的小任务吧！
+      </div>
+
+      <!-- 按钮区域 -->
+      <div class="button-area" id="button-area">
+        <button id="btn-start" class="btn btn-primary btn-large">
+          ✏️ 开始作业
+        </button>
+        <button id="btn-pause" class="btn btn-secondary" style="display:none;">
+          ⏸️ 暂停一下
+        </button>
+        <button id="btn-resume" class="btn btn-primary" style="display:none;">
+          ▶️ 继续作业
+        </button>
+        <button id="btn-finish" class="btn btn-success" style="display:none;">
+          ✅ 我写完啦
+        </button>
+        <button id="btn-reset" class="btn btn-danger btn-small" style="display:none;">
+          🔄 重新开始今天
+        </button>
+      </div>
+    </div>
+
+    <!-- ========== 家长确认弹窗 ========== -->
+    <div id="modal-parent" class="modal" style="display:none;">
+      <div class="modal-overlay"></div>
+      <div class="modal-content parent-confirm">
+        <div class="modal-header">
+          <span class="modal-icon">🔍</span>
+          <h2>请爸爸妈妈检查一下</h2>
+        </div>
+        <div class="checklist">
+          <label class="check-item">
+            <input type="checkbox" id="check-homework">
+            <span class="check-box"></span>
+            <span class="check-text">作业完成了</span>
+          </label>
+          <label class="check-item">
+            <input type="checkbox" id="check-corrections">
+            <span class="check-box"></span>
+            <span class="check-text">订正完成了</span>
+          </label>
+          <label class="check-item">
+            <input type="checkbox" id="check-attitude">
+            <span class="check-box"></span>
+            <span class="check-text">今天写得认真</span>
+          </label>
+        </div>
+        <div class="modal-buttons">
+          <button id="btn-confirm" class="btn btn-success btn-large" disabled>
+            🎉 确认完成，解锁快乐时间
+          </button>
+          <button id="btn-call-it-a-day" class="btn btn-secondary">
+            🌙 今天就到这吧
+          </button>
+          <button id="btn-retry" class="btn btn-warning">
+            ✏️ 还要再改一改
+          </button>
+        </div>
+        <div class="modal-tip" id="parent-tip" style="display:none;">
+          🕵️ 小侦探发现还有一点点需要修正，加油，马上就能解锁快乐时间！
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== 庆祝页面 ========== -->
+    <div id="page-celebration" class="page" style="display:none;">
+      <div class="celebration-container">
+        <!-- 撒花容器 -->
+        <div class="confetti-container" id="confetti-container"></div>
+
+        <div class="celebration-content">
+          <div class="celebration-stars">⭐🌟✨🌟⭐</div>
+          <h1 class="celebration-title" id="celebration-title">太棒啦！</h1>
+          <div class="celebration-badge" id="celebration-badge">专注小火箭</div>
+          <div class="celebration-time" id="celebration-time">
+            你为自己赢得了 <span class="highlight">38</span> 分钟快乐时间！
+          </div>
+          <div class="celebration-message" id="celebration-message">
+            认真完成作业的小朋友，值得拥有快乐时间！
+          </div>
+
+          <!-- 快乐时间用途选择 -->
+          <div class="reward-section">
+            <h3>🎁 选择你的快乐时间</h3>
+            <div class="reward-choices">
+              <button class="reward-btn" data-choice="看动画">📺 看动画</button>
+              <button class="reward-btn" data-choice="玩玩具">🧸 玩玩具</button>
+              <button class="reward-btn" data-choice="听故事">📖 听故事</button>
+              <button class="reward-btn" data-choice="亲子游戏">👨‍👩‍👧 亲子游戏</button>
+              <button class="reward-btn" data-choice="自由安排">🌈 自由安排</button>
+            </div>
+          </div>
+
+          <div class="celebration-footer">
+            <button id="btn-back-home" class="btn btn-primary">
+              🏠 回到首页
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ========== 家长数据页面 ========== -->
+    <div id="page-stats" class="page" style="display:none;">
+      <header class="header">
+        <div class="header-left">
+          <button id="btn-back" class="btn-icon">← 返回</button>
+          <span class="app-title">📊 家长数据</span>
+        </div>
+      </header>
+
+      <!-- PIN 输入 -->
+      <div id="pin-area" class="pin-area">
+        <div class="pin-icon">🔒</div>
+        <h2>请输入家长密码</h2>
+        <div class="pin-input-group">
+          <input type="password" id="pin-input" class="pin-input" maxlength="4" placeholder="· · · ·" inputmode="numeric">
+          <button id="btn-pin" class="btn btn-primary">确认</button>
+        </div>
+        <p class="pin-hint">默认密码：1234</p>
+      </div>
+
+      <!-- 数据内容 -->
+      <div id="stats-content" class="stats-content" style="display:none;">
+        <!-- 统计概览 -->
+        <div class="stats-summary">
+          <div class="stat-card">
+            <div class="stat-value" id="stat-avg-homework">--</div>
+            <div class="stat-label">7天平均作业用时</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-avg-happy">--</div>
+            <div class="stat-label">7天平均快乐时间</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-value" id="stat-stars">--</div>
+            <div class="stat-label">本周获得星星</div>
+          </div>
+        </div>
+
+        <!-- 一周星星图 -->
+        <div class="stars-section">
+          <h3>⭐ 本周星星图</h3>
+          <div class="stars-grid" id="stars-grid"></div>
+        </div>
+
+        <!-- 记录列表 -->
+        <div class="records-section">
+          <div class="records-header">
+            <h3>📋 最近记录</h3>
+            <div class="records-tabs">
+              <button class="tab-btn active" data-range="7">近7天</button>
+              <button class="tab-btn" data-range="30">近30天</button>
+            </div>
+          </div>
+          <div class="records-list" id="records-list"></div>
+        </div>
+
+        <!-- 设置区域 -->
+        <div class="settings-section">
+          <h3>⚙️ 设置</h3>
+          <div class="setting-item">
+            <label>睡觉时间</label>
+            <input type="time" id="setting-bedtime" class="setting-input">
+          </div>
+          <div class="setting-item">
+            <label>家长密码</label>
+            <input type="password" id="setting-pin" class="setting-input" maxlength="4" placeholder="4位数字">
+          </div>
+          <div class="setting-actions">
+            <button id="btn-save-settings" class="btn btn-primary">保存设置</button>
+            <button id="btn-export" class="btn btn-secondary">📤 导出数据</button>
+            <button id="btn-clear-data" class="btn btn-danger">🗑️ 清空记录</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
