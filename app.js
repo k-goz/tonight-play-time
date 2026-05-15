@@ -345,9 +345,21 @@ const App = {
   // ---------- 初始化 ----------
 
   init() {
+    // Initialize API service
+    this.apiReady = false;
+    this.currentSessionId = null;
+
+    // Check if user is logged in
+    if (API_SERVICE.isLoggedIn()) {
+      this.apiReady = true;
+      this.user = API_SERVICE.user;
+      console.log('User logged in:', this.user.nickname);
+    }
+
     this.settings = Storage.getSettings();
     this.updateBedtimeDisplay();
     this.bindEvents();
+    this.bindAuthEvents();
     this.restoreTodayState();
     this.startClock();
     this.registerSW();
@@ -408,6 +420,186 @@ const App = {
     const btnClearData = document.getElementById('btn-clear-data');
     if (btnClearData) {
       btnClearData.addEventListener('click', () => this.clearAllData());
+    }
+
+    // Logout button (add to settings section)
+    const logoutBtn = document.createElement('button');
+    logoutBtn.className = 'btn btn-danger';
+    logoutBtn.textContent = '🚪 退出登录';
+    logoutBtn.style.marginTop = '0.5rem';
+    logoutBtn.addEventListener('click', () => this.handleLogout());
+    const settingsSection = document.querySelector('.settings-section .setting-actions');
+    if (settingsSection) {
+      settingsSection.appendChild(logoutBtn);
+    }
+  },
+
+  // ---------- 认证事件 ----------
+
+  bindAuthEvents() {
+    // 登录表单切换
+    document.getElementById('show-register').addEventListener('click', (e) => {
+      e.preventDefault();
+      document.getElementById('login-form').style.display = 'none';
+      document.getElementById('register-form').style.display = 'block';
+    });
+
+    document.getElementById('show-login').addEventListener('click', (e) => {
+      e.preventDefault();
+      document.getElementById('register-form').style.display = 'none';
+      document.getElementById('login-form').style.display = 'block';
+    });
+
+    // 登录按钮
+    document.getElementById('btn-login').addEventListener('click', () => this.handleLogin());
+    document.getElementById('login-password').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.handleLogin();
+    });
+
+    // 注册按钮
+    document.getElementById('btn-register').addEventListener('click', () => this.handleRegister());
+    document.getElementById('reg-password').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.handleRegister();
+    });
+
+    // 跳过登录
+    document.getElementById('skip-login').addEventListener('click', (e) => {
+      e.preventDefault();
+      this.skipAuth();
+    });
+
+    // 检查是否需要显示登录页
+    this.checkAuthState();
+  },
+
+  checkAuthState() {
+    if (API_SERVICE.isLoggedIn()) {
+      this.enterApp();
+    } else if (localStorage.getItem('skip_auth') === 'true') {
+      this.enterApp();
+    }
+  },
+
+  async handleLogin() {
+    const username = document.getElementById('login-username').value.trim();
+    const password = document.getElementById('login-password').value;
+    const errorEl = document.getElementById('login-error');
+
+    if (!username || !password) {
+      errorEl.textContent = '请输入用户名和密码';
+      errorEl.style.display = 'block';
+      return;
+    }
+
+    try {
+      await API_SERVICE.login(username, password);
+      this.user = API_SERVICE.user;
+      this.apiReady = true;
+      this.enterApp();
+    } catch (error) {
+      errorEl.textContent = error.message;
+      errorEl.style.display = 'block';
+    }
+  },
+
+  async handleRegister() {
+    const username = document.getElementById('reg-username').value.trim();
+    const nickname = document.getElementById('reg-nickname').value.trim();
+    const password = document.getElementById('reg-password').value;
+    const errorEl = document.getElementById('register-error');
+
+    if (!username || !nickname || !password) {
+      errorEl.textContent = '请填写所有字段';
+      errorEl.style.display = 'block';
+      return;
+    }
+
+    if (password.length < 4) {
+      errorEl.textContent = '密码至少4位';
+      errorEl.style.display = 'block';
+      return;
+    }
+
+    try {
+      await API_SERVICE.register(username, nickname, password);
+      this.user = API_SERVICE.user;
+      this.apiReady = true;
+      this.enterApp();
+    } catch (error) {
+      errorEl.textContent = error.message;
+      errorEl.style.display = 'block';
+    }
+  },
+
+  skipAuth() {
+    localStorage.setItem('skip_auth', 'true');
+    this.apiReady = false;
+    this.enterApp();
+  },
+
+  enterApp() {
+    document.getElementById('page-auth').classList.remove('active');
+    document.getElementById('page-auth').style.display = 'none';
+    document.getElementById('page-timer').classList.add('active');
+    document.getElementById('page-timer').style.display = 'block';
+
+    if (this.user) {
+      this.addUserInfoToHeader();
+    }
+
+    if (this.apiReady) {
+      this.syncFromServer();
+    }
+  },
+
+  addUserInfoToHeader() {
+    const headerRight = document.querySelector('.header-right');
+    const existingInfo = document.querySelector('.user-info');
+    if (existingInfo) return;
+
+    const userInfo = document.createElement('div');
+    userInfo.className = 'user-info';
+    userInfo.innerHTML = `
+      <span class="user-avatar">${this.user.nickname.charAt(0)}</span>
+      <span>${this.user.nickname}</span>
+    `;
+    headerRight.insertBefore(userInfo, headerRight.firstChild);
+  },
+
+  async syncFromServer() {
+    if (!this.apiReady) return;
+
+    try {
+      const today = TimeUtils.getBeijingDateStr();
+      const sessions = await API_SERVICE.getSessions(1);
+      const todaySession = sessions.find(s => s.date === today);
+
+      if (todaySession) {
+        this.currentSessionId = todaySession.id;
+        this.restoreFromServerSession(todaySession);
+      }
+
+      console.log('Data synced from server');
+    } catch (error) {
+      console.warn('Failed to sync from server:', error);
+    }
+  },
+
+  restoreFromServerSession(session) {
+    if (session.completed) {
+      this.state = STATE.COMPLETED;
+      this.homeworkSeconds = session.homework_minutes * 60;
+      this.showCompletionPage(session);
+    }
+  },
+
+  async handleLogout() {
+    if (confirm('确定要退出登录吗？')) {
+      API_SERVICE.logout();
+      this.user = null;
+      this.apiReady = false;
+      localStorage.removeItem('skip_auth');
+      location.reload();
     }
   },
 

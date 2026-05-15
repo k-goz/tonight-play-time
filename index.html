@@ -15,6 +15,58 @@
 </head>
 <body>
   <div id="app">
+    <!-- ========== 登录/注册页面 ========== -->
+    <div id="page-auth" class="page active">
+      <div class="auth-container">
+        <div class="auth-header">
+          <div class="auth-logo">🌙</div>
+          <h1 class="auth-title">今晚还能玩多久</h1>
+          <p class="auth-subtitle">亲子时间管理工具</p>
+        </div>
+
+        <!-- 登录表单 -->
+        <div id="login-form" class="auth-form">
+          <h2>登录账号</h2>
+          <div class="form-group">
+            <label>用户名</label>
+            <input type="text" id="login-username" class="form-input" placeholder="请输入用户名" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label>密码</label>
+            <input type="password" id="login-password" class="form-input" placeholder="请输入密码" autocomplete="current-password">
+          </div>
+          <button id="btn-login" class="btn btn-primary btn-large btn-full">登录</button>
+          <p class="auth-switch">还没有账号？<a href="#" id="show-register">立即注册</a></p>
+          <div class="auth-error" id="login-error" style="display:none;"></div>
+        </div>
+
+        <!-- 注册表单 -->
+        <div id="register-form" class="auth-form" style="display:none;">
+          <h2>创建账号</h2>
+          <div class="form-group">
+            <label>用户名</label>
+            <input type="text" id="reg-username" class="form-input" placeholder="请输入用户名" autocomplete="username">
+          </div>
+          <div class="form-group">
+            <label>昵称</label>
+            <input type="text" id="reg-nickname" class="form-input" placeholder="小朋友的昵称">
+          </div>
+          <div class="form-group">
+            <label>密码</label>
+            <input type="password" id="reg-password" class="form-input" placeholder="请设置密码" autocomplete="new-password">
+          </div>
+          <button id="btn-register" class="btn btn-primary btn-large btn-full">注册</button>
+          <p class="auth-switch">已有账号？<a href="#" id="show-login">去登录</a></p>
+          <div class="auth-error" id="register-error" style="display:none;"></div>
+        </div>
+
+        <!-- 跳过登录 -->
+        <div class="auth-skip">
+          <a href="#" id="skip-login">暂时跳过，使用本地模式</a>
+        </div>
+      </div>
+    </div>
+
     <!-- ========== 今日作业页面 ========== -->
     <div id="page-timer" class="page active">
       <!-- 顶部信息栏 -->
@@ -253,6 +305,7 @@
     </div>
   </div>
 
+  <script src="api-service.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
