@@ -16,15 +16,12 @@ const API_SERVICE = {
     this.token = localStorage.getItem('api_token');
     this.user = JSON.parse(localStorage.getItem('api_user') || 'null');
     
-    // Set base URL based on environment
+    // Set base URL - always use MacBook8 backend
     if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
       this.BASE_URL = 'http://localhost:8001';
-    } else if (window.location.hostname === '100.81.234.57') {
-      // Production: use same origin or configured API URL
-      this.BASE_URL = 'http://100.81.234.57:8001';
     } else {
-      // GitHub Pages or other - use local mode
-      this.BASE_URL = '';
+      // Use MacBook8 Tailscale IP
+      this.BASE_URL = 'http://100.81.234.57:8001';
     }
 
     console.log('API Service initialized, base URL:', this.BASE_URL);
