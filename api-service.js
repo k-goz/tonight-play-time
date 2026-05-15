@@ -16,15 +16,10 @@ const API_SERVICE = {
     this.token = localStorage.getItem('api_token');
     this.user = JSON.parse(localStorage.getItem('api_user') || 'null');
     
-    // Set base URL - always use MacBook8 backend
-    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
-      this.BASE_URL = 'http://localhost:8001';
-    } else {
-      // Use MacBook8 Tailscale IP
-      this.BASE_URL = 'http://100.81.234.57:8001';
-    }
+    // Use relative URL (same origin) - works for both local and cloud deployment
+    this.BASE_URL = '';
 
-    console.log('API Service initialized, base URL:', this.BASE_URL);
+    console.log('API Service initialized, base URL:', this.BASE_URL || '(same origin)');
   },
 
   /**
