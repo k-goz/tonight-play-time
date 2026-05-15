@@ -4,14 +4,17 @@ const cors = require('cors');
 const path = require('path');
 
 const app = express();
-const PORT = 8001;
+const PORT = process.env.PORT || 8001;
 
 // Middleware
 app.use(cors());
 app.use(express.json());
 
-// Database setup
-const db = new sqlite3.Database('./tonight_play_time.db');
+// Database setup - use /data for persistent storage on Railway
+const dbPath = process.env.RAILWAY_VOLUME_MOUNT_PATH 
+  ? `${process.env.RAILWAY_VOLUME_MOUNT_PATH}/tonight_play_time.db`
+  : './tonight_play_time.db';
+const db = new sqlite3.Database(dbPath);
 
 // Create tables
 db.serialize(() => {
