@@ -7,9 +7,10 @@
     "start": "node backend/server.js",
     "dev": "node backend/server.js",
     "build": "node scripts/build-static.js",
-    "check": "node --check time-utils.js && node --check app.js && node --check api-service.js && node --check service-worker.js && node --check backend/server.js && node --check backend/postgres-db.js && node --check backend/postgres-schema.js && node --check api/index.js && node --check scripts/build-static.js && node --check scripts/postgres-utils.js && node --check scripts/migrate-sqlite-to-postgres.js && node --check scripts/backup-postgres.js && node --check scripts/restore-postgres.js",
+    "check": "node --check time-utils.js && node --check app.js && node --check api-service.js && node --check service-worker.js && node --check backend/server.js && node --check backend/postgres-db.js && node --check backend/neon-http-db.js && node --check backend/postgres-schema.js && node --check api/index.js && node --check scripts/build-static.js && node --check scripts/postgres-utils.js && node --check scripts/migrate-sqlite-to-postgres.js && node --check scripts/backup-postgres.js && node --check scripts/restore-postgres.js",
     "test": "node --test tests/*.test.js",
     "test:postgres": "RUN_POSTGRES_TESTS=1 node --env-file=.env.local --test tests/postgres-e2e.test.js",
+    "test:neon-http": "VERCEL=1 RUN_POSTGRES_TESTS=1 node --env-file=.env.local --test tests/postgres-e2e.test.js",
     "db:backup": "node scripts/backup-db.js",
     "db:restore": "node scripts/restore-db.js",
     "db:migrate:postgres": "node --env-file=.env.local scripts/migrate-sqlite-to-postgres.js",
@@ -18,9 +19,10 @@
     "db:restore:postgres": "node --env-file=.env.local scripts/restore-postgres.js",
     "verify:production": "node scripts/verify-production.js",
     "quality": "npm run check && npm test && npm audit --omit=dev",
-    "quality:cloud": "npm run quality && npm run test:postgres && npm run db:verify:postgres"
+    "quality:cloud": "npm run quality && npm run test:postgres && npm run test:neon-http && npm run db:verify:postgres"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "express": "^4.18.2",
     "pg": "^8.23.0",
     "sqlite3": "^6.0.1"

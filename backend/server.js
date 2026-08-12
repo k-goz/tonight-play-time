@@ -3,6 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { createPostgresDatabase } = require('./postgres-db');
+const { createNeonHttpDatabase } = require('./neon-http-db');
 const { POSTGRES_SCHEMA_VERSION, initializePostgresSchema } = require('./postgres-schema');
 
 const app = express();
@@ -30,7 +31,9 @@ let dbPath = null;
 let db;
 
 if (databaseDialect === 'postgres') {
-  db = createPostgresDatabase(postgresUrl);
+  db = process.env.VERCEL
+    ? createNeonHttpDatabase(postgresUrl)
+    : createPostgresDatabase(postgresUrl);
 } else {
   const sqlite3 = require('sqlite3').verbose();
   dbPath = process.env.RAILWAY_VOLUME_MOUNT_PATH
@@ -480,12 +483,31 @@ const sqliteDatabaseReady = () => new Promise((resolve, reject) => {
   });
 });
 
-const databaseReady = databaseDialect === 'postgres'
-  ? initializePostgresSchema(db)
-  : sqliteDatabaseReady();
+let databaseReady;
+
+function beginDatabaseInitialization() {
+  const initialization = databaseDialect === 'postgres'
+    ? initializePostgresSchema(db)
+    : sqliteDatabaseReady();
+  // Attach a handler immediately so a slow first request on a cold serverless
+  // instance never produces an unhandled-rejection process exit. Clearing the
+  // cached promise lets the next request recover from a transient Neon outage.
+  initialization.catch(error => {
+    console.error('Database initialization failed:', error);
+    if (databaseReady === initialization) databaseReady = null;
+  });
+  return initialization;
+}
+
+function getDatabaseReady() {
+  if (!databaseReady) databaseReady = beginDatabaseInitialization();
+  return databaseReady;
+}
+
+databaseReady = beginDatabaseInitialization();
 
 app.use((req, res, next) => {
-  databaseReady.then(() => next()).catch((error) => {
+  getDatabaseReady().then(() => next()).catch((error) => {
     console.error('Database initialization failed:', error);
     res.status(503).json({ detail: '数据库初始化失败' });
   });
@@ -1614,6 +1636,50 @@ app.post('/api/sessions/import', auth, parentAuth, (req, res) => {
     let imported = 0;
     let skipped = 0;
     let index = 0;
+
+    if (databaseDialect === 'postgres') {
+      const statements = normalized.map(record => ({
+        sql: `INSERT INTO homework_sessions (
+          user_id, child_id, date, homework_minutes, start_time, end_time, completed,
+          homework_done, correction_done, attitude_good, playtime_type,
+          playtime_minutes, bedtime, state, homework_seconds, paused_seconds,
+          remaining_seconds, reward_choice, title, call_it_a_day
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, child_id, date) DO UPDATE SET
+          homework_minutes = excluded.homework_minutes,
+          start_time = excluded.start_time,
+          end_time = excluded.end_time,
+          completed = 1,
+          homework_done = excluded.homework_done,
+          correction_done = excluded.correction_done,
+          attitude_good = excluded.attitude_good,
+          playtime_type = excluded.playtime_type,
+          playtime_minutes = excluded.playtime_minutes,
+          bedtime = excluded.bedtime,
+          state = 'completed',
+          homework_seconds = excluded.homework_seconds,
+          paused_seconds = excluded.paused_seconds,
+          remaining_seconds = excluded.remaining_seconds,
+          reward_choice = excluded.reward_choice,
+          title = excluded.title,
+          call_it_a_day = excluded.call_it_a_day,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE homework_sessions.completed = 0`,
+        params: [
+          req.userId, child.id, record.date, record.homeworkSeconds / 60,
+          record.startTime, record.endTime, record.homeworkDone, record.correctionDone,
+          record.attitudeGood, record.rewardChoice, record.remainingSeconds / 60,
+          record.bedtime, record.homeworkSeconds, record.pausedSeconds,
+          record.remainingSeconds, record.rewardChoice, record.title, record.callItADay
+        ]
+      }));
+      return db.transaction(statements, (transactionError, results = []) => {
+        if (transactionError) return res.status(500).json({ detail: '记录导入失败' });
+        imported = results.reduce((total, result) => total + (result.rowCount || 0), 0);
+        skipped = normalized.length - imported;
+        res.json({ imported, skipped });
+      });
+    }
 
     const finish = (error) => {
       if (error) {

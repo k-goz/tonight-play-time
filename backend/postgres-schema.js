@@ -209,6 +209,9 @@ ON CONFLICT (version) DO NOTHING;
 `;
 
 async function initializePostgresSchema(database) {
+  if (database.dialect === 'postgres-http') {
+    return database.initializeSchema(POSTGRES_SCHEMA_SQL, POSTGRES_SCHEMA_VERSION);
+  }
   return database.withClient(async client => {
     const current = await client.query(`
       SELECT CASE WHEN to_regclass('public.schema_migrations') IS NULL THEN 0

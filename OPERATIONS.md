@@ -56,6 +56,16 @@ DATABASE_PATH=/absolute/path/restored.db npm run verify:production
 - iOS Safari / Android Chrome 安装、离线、通知拒绝降级和恢复联网均验证
 - 旧版本先灰度；出现迁移或同步异常时停止写入并恢复发布前快照
 
+Vercel 发布回滚：
+
+```bash
+./scripts/rollback-vercel.sh <previous-deployment-id> --confirm
+```
+
+代码回退点使用 Git 标签 `m11-pre-cloud-migration`；稳定的 M11 生产版本使用
+`m11-production-v1`。数据库 Schema V6 采用向前兼容设计，回滚应用前先停止写入并
+保留 PostgreSQL 一致性备份，不执行破坏性降级迁移。
+
 ## 已知边界
 
 - 登录和 PIN 限流以单个 Function 实例为边界；后续高流量阶段应迁移到共享限流存储。

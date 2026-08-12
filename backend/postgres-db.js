@@ -56,7 +56,7 @@ function createPostgresDatabase(connectionString) {
     ssl: { rejectUnauthorized: true },
     max: Number(process.env.POSTGRES_POOL_MAX) || 3,
     idleTimeoutMillis: 10_000,
-    connectionTimeoutMillis: 10_000,
+    connectionTimeoutMillis: 20_000,
     allowExitOnIdle: process.env.NODE_ENV !== 'production'
   });
   const transactionStorage = new AsyncLocalStorage();
@@ -125,6 +125,27 @@ function createPostgresDatabase(connectionString) {
       const client = await pool.connect();
       try {
         return await callback(client);
+      } finally {
+        client.release();
+      }
+    },
+
+    async transaction(statements, callback) {
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        const results = [];
+        for (const item of statements) {
+          results.push(await client.query(
+            normalizeStatement(item.sql, { insertId: Boolean(item.insertId) }),
+            (item.params || []).map(value => typeof value === 'boolean' ? (value ? 1 : 0) : value)
+          ));
+        }
+        await client.query('COMMIT');
+        callback?.(null, results);
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        callback?.(postgresError(error));
       } finally {
         client.release();
       }

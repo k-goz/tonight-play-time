@@ -2,39 +2,37 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
+  "regions": ["sin1"],
   "functions": {
     "api/index.js": {
       "maxDuration": 30
     }
   },
-  "rewrites": [
+  "routes": [
     {
-      "source": "/api/:path*",
-      "destination": "/api/index"
-    }
-  ],
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'" },
-        { "key": "Referrer-Policy", "value": "no-referrer" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options", "value": "DENY" },
-        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" }
-      ]
+      "src": "/(.*)",
+      "headers": {
+        "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; worker-src 'self'; manifest-src 'self'; base-uri 'none'; frame-ancestors 'none'",
+        "Referrer-Policy": "no-referrer",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Permissions-Policy": "camera=(), microphone=(), geolocation=()"
+      },
+      "continue": true
     },
     {
-      "source": "/api/:path*",
-      "headers": [
-        { "key": "Cache-Control", "value": "private, no-store" }
-      ]
+      "src": "/api/(.*)",
+      "headers": { "Cache-Control": "private, no-store" },
+      "continue": true
     },
     {
-      "source": "/service-worker.js",
-      "headers": [
-        { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
-      ]
-    }
+      "src": "/service-worker\\.js",
+      "headers": { "Cache-Control": "public, max-age=0, must-revalidate" },
+      "continue": true
+    },
+    { "src": "/api/(.*)", "dest": "/api/index?path=$1" },
+    { "handle": "filesystem" },
+    { "src": "/", "dest": "/index.html" },
+    { "src": "/(.*)", "status": 404 }
   ]
 }

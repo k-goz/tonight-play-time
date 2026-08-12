@@ -51,7 +51,7 @@ api-service.js               认证、会话、设置与迁移 API
 service-worker.js            PWA 静态资源缓存（API 不缓存）
 api/index.js                 Vercel Function 入口
 backend/server.js            Express API、认证、双数据库运行时与静态文件白名单
-backend/postgres-*.js        PostgreSQL 连接池、幂等 V6 Schema 与迁移
+backend/*postgres*.js        PostgreSQL/Neon HTTPS、幂等 V6 Schema 与迁移
 scripts/                     SQLite/PostgreSQL 迁移、备份、恢复和完整性检查
 backend/data/                本地数据库目录（不进入 Git）
 tests/                       API、安全边界与时间计算回归测试
