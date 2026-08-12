@@ -568,6 +568,142 @@ test('parent grants enforce scope, revocation, and one-time completion approval'
   assert.equal(reusedApproval.response.status, 403);
 });
 
+test('M5-M10 family platform APIs persist preferences, reminders, growth, conflicts and validation intent', async () => {
+  const registration = await api('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'platform_family', nickname: '小宇宙', password: 'platform1234' })
+  });
+  assert.equal(registration.response.status, 201);
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${registration.body.access_token}`
+  };
+  const childId = registration.body.child_id;
+
+  const preferences = await api('/api/family/preferences', { headers });
+  assert.equal(preferences.body.allow_child_switch, false);
+  const protectedPreferences = await api('/api/family/preferences', {
+    method: 'PUT', headers, body: JSON.stringify({ allow_child_switch: true })
+  });
+  assert.equal(protectedPreferences.response.status, 403);
+  const parent = await parentHeaders(headers, '1234');
+  const savedPreferences = await api('/api/family/preferences', {
+    method: 'PUT', headers: parent, body: JSON.stringify({ allow_child_switch: true })
+  });
+  assert.equal(savedPreferences.response.status, 200);
+  assert.equal(savedPreferences.body.allow_child_switch, true);
+
+  const childSettings = await api(`/api/children/${childId}`, {
+    method: 'PUT',
+    headers: parent,
+    body: JSON.stringify({
+      reminder_enabled: true,
+      reminder_time: '19:15',
+      weekend_reminder_time: '18:45',
+      pause_reminder_minutes: 15,
+      weekly_goal: 4,
+      reward_text: '周末一起骑车'
+    })
+  });
+  assert.equal(childSettings.response.status, 200);
+  assert.equal(childSettings.body.reminder_enabled, 1);
+  assert.equal(childSettings.body.weekend_reminder_time, '18:45');
+  assert.equal(childSettings.body.weekly_goal, 4);
+
+  const reminder = await api('/api/reminders/events', {
+    method: 'POST', headers,
+    body: JSON.stringify({ child_id: childId, event_type: 'test', status: 'delivered', detail: '测试触达' })
+  });
+  assert.equal(reminder.response.status, 201);
+  const reminderEvents = await api(`/api/reminders/events?child_id=${childId}`, { headers: parent });
+  assert.equal(reminderEvents.body[0].status, 'delivered');
+
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(new Date());
+  const session = await api('/api/sessions', {
+    method: 'POST', headers, body: JSON.stringify({ child_id: childId, date: today, bedtime: '21:30' })
+  });
+  assert.equal(session.body.version, 1);
+  const racingUpdates = await Promise.all([
+    api(`/api/sessions/${session.body.id}`, {
+      method: 'PUT', headers,
+      body: JSON.stringify({ state: 'running', homework_seconds: 60, client_version: 1, device_id: 'device-a' })
+    }),
+    api(`/api/sessions/${session.body.id}`, {
+      method: 'PUT', headers,
+      body: JSON.stringify({ state: 'paused', homework_seconds: 90, client_version: 1, device_id: 'device-b' })
+    })
+  ]);
+  assert.deepEqual(racingUpdates.map(result => result.response.status).sort(), [200, 409]);
+  const updated = racingUpdates.find(result => result.response.status === 200);
+  const stale = racingUpdates.find(result => result.response.status === 409);
+  assert.equal(updated.body.version, 2);
+  assert.ok(stale.body.conflict_id > 0);
+  const conflicts = await api('/api/sync/conflicts', { headers: parent });
+  assert.equal(conflicts.body.length, 1);
+  const resolved = await api(`/api/sync/conflicts/${stale.body.conflict_id}/resolve`, {
+    method: 'POST', headers: parent, body: JSON.stringify({ resolution: 'server' })
+  });
+  assert.equal(resolved.body.resolved, true);
+
+  const completion = await api(`/api/sessions/${session.body.id}`, {
+    method: 'PUT',
+    headers: { ...headers, 'X-Parent-Approval': await approvalToken(headers, '1234') },
+    body: JSON.stringify({
+      state: 'completed', completed: true, homework_done: true, correction_done: true,
+      attitude_good: true, homework_minutes: 12, playtime_minutes: 25, client_version: 2
+    })
+  });
+  assert.equal(completion.response.status, 200);
+  const insights = await api(`/api/insights/weekly?child_id=${childId}`, { headers: parent });
+  assert.equal(insights.body.goal, 4);
+  assert.equal(insights.body.completed_days, 1);
+  const todayDate = new Date(`${today}T12:00:00+08:00`);
+  if (todayDate.getUTCDay() > 0) {
+    todayDate.setUTCDate(todayDate.getUTCDate() - 1);
+    const protectionDate = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(todayDate);
+    const protection = await api('/api/growth/protection', {
+      method: 'POST', headers: parent,
+      body: JSON.stringify({ child_id: childId, date: protectionDate, reason: '生病休息' })
+    });
+    assert.equal(protection.response.status, 201);
+    const repeatedProtection = await api('/api/growth/protection', {
+      method: 'POST', headers: parent,
+      body: JSON.stringify({ child_id: childId, date: protectionDate, reason: '重复保护' })
+    });
+    assert.equal(repeatedProtection.response.status, 400);
+  }
+  const reward = await api('/api/rewards/current', {
+    method: 'PUT', headers: parent,
+    body: JSON.stringify({ child_id: childId, reward_text: '周末一起骑车', status: 'approved' })
+  });
+  assert.equal(reward.body.status, 'approved');
+
+  const plan = await api('/api/plan', { headers });
+  assert.equal(plan.body.plan_tier, 'free');
+  const intent = await api('/api/product-events', {
+    method: 'POST', headers: parent,
+    body: JSON.stringify({ event_type: 'purchase_intent', price_point: 1900, feedback: '愿意为周报付费' })
+  });
+  assert.equal(intent.response.status, 201);
+  const trial = await api('/api/plan/trial', { method: 'POST', headers: parent, body: '{}' });
+  assert.equal(trial.body.started, true);
+  const metrics = await api('/api/product-metrics', { headers: parent });
+  assert.equal(metrics.body.events[0].count, 1);
+  assert.equal(metrics.body.funnel.activated, true);
+  assert.equal(metrics.body.funnel.purchase_intent, true);
+
+  const operations = await api('/api/operations/status', { headers: parent });
+  assert.equal(operations.body.schema_version, 5);
+  assert.equal(operations.body.database_integrity, 'ok');
+  const logs = await api('/api/audit-logs', { headers: parent });
+  assert.ok(logs.body.some(log => log.action === 'plan.trial_started'));
+});
+
 test('bulk record deletion is account-scoped and keeps the account', async () => {
   const firstLogin = await api('/api/auth/login', {
     method: 'POST',

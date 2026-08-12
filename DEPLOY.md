@@ -66,13 +66,33 @@ DEPLOY_SERVER=user@host ./deploy.sh
 npm run check
 npm test
 npm audit --omit=dev
+npm run db:backup
+npm run verify:production
 ```
 
 还必须确认：
 
 - 旧版脚本中曾出现过的服务器凭据已经轮换。
 - SQLite 所在目录不可被 Web 服务读取。
-- 升级前已备份 SQLite；启动时会自动升级到 V4：保留 V3 家庭规则，并新增短时家长授权表。
+- 升级前已备份 SQLite；启动时会自动升级到 V5：保留历史和家长授权，并新增提醒、成长、冲突、审计与产品验证结构。
 - 部署后已验证家长模式授权、主动锁定、完成确认令牌和敏感接口 `403` 边界。
 - 已配置定期数据库备份与恢复演练。
 - 健康检查、服务重启和 HTTPS 均正常。
+- 已在实际 iOS Safari PWA 与 Android Chrome PWA 完成安装、通知降级、离线计时和重新登录测试。
+
+建议通过 cron 每天执行：
+
+```cron
+15 3 * * * cd /opt/tonight-play-time && DATABASE_PATH=/var/lib/tonight-play-time/app.db BACKUP_RETENTION=14 npm run db:backup >> /var/log/tonight-play-time-backup.log 2>&1
+```
+
+恢复前必须停止应用，并显式指定备份：
+
+```bash
+sudo systemctl stop tonight-play-time
+DATABASE_PATH=/var/lib/tonight-play-time/app.db npm run db:restore -- /absolute/path/backup.db --confirm
+DATABASE_PATH=/var/lib/tonight-play-time/app.db npm run verify:production
+sudo systemctl start tonight-play-time
+```
+
+完整操作说明见 [OPERATIONS.md](OPERATIONS.md)。

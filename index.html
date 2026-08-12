@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <title>今晚还能玩多久</title>
-  <link rel="stylesheet" href="style.css?v=9">
+  <link rel="stylesheet" href="style.css?v=10">
 </head>
 <body>
   <div id="app">
@@ -67,6 +67,26 @@
       </div>
     </div>
 
+    <!-- ========== 家庭启动台 ========== -->
+    <div id="page-launcher" class="page" style="display:none;">
+      <div class="launcher-shell">
+        <div class="launcher-heading">
+          <div>
+            <span class="eyebrow">家庭启动台</span>
+            <h1>今晚是谁来挑战？</h1>
+            <p>选择孩子，进入自己的今日任务。</p>
+          </div>
+          <button id="btn-launcher-parent" class="parent-entry"><span>🔒</span> 家长模式</button>
+        </div>
+        <div id="launcher-children" class="launcher-grid"></div>
+        <label class="device-default-toggle">
+          <input type="checkbox" id="launcher-remember-child">
+          <span>将选中的孩子设为本设备默认</span>
+        </label>
+        <p id="launcher-message" class="settings-message" aria-live="polite"></p>
+      </div>
+    </div>
+
     <!-- ========== 今日作业页面 ========== -->
     <div id="page-timer" class="page active">
       <!-- 顶部信息栏 -->
@@ -75,10 +95,12 @@
           <span class="app-title">🌙 今晚还能玩多久</span>
         </div>
         <div class="header-right">
+          <button id="btn-launcher" class="family-home-button" style="display:none;">👨‍👩‍👧 家庭</button>
           <div id="child-switcher" class="child-switcher" style="display:none;">
             <span id="active-child-avatar" class="child-switcher-avatar">🌙</span>
             <select id="child-selector" class="child-selector" aria-label="切换孩子"></select>
           </div>
+          <span id="sync-indicator" class="sync-indicator" title="同步状态">● 已同步</span>
           <button id="btn-stats" class="parent-entry" title="进入家长模式">
             <span aria-hidden="true">🔒</span><span>家长</span>
           </button>
@@ -272,6 +294,14 @@
 
       <!-- 数据内容 -->
       <div id="stats-content" class="stats-content" style="display:none;">
+        <nav class="parent-section-nav" aria-label="家长功能导航">
+          <button class="parent-nav-btn active" data-parent-target="overview-section">概览</button>
+          <button class="parent-nav-btn" data-parent-target="growth-section">成长</button>
+          <button class="parent-nav-btn" data-parent-target="sync-section">同步</button>
+          <button class="parent-nav-btn" data-parent-target="operations-section">运行</button>
+          <button class="parent-nav-btn" data-parent-target="plan-section">家庭版</button>
+        </nav>
+        <div id="overview-section" class="parent-panel active">
         <!-- 统计概览 -->
         <div class="stats-summary">
           <div class="stat-card">
@@ -305,11 +335,91 @@
           </div>
           <div class="records-list" id="records-list"></div>
         </div>
+        </div>
+
+        <div id="growth-section" class="parent-panel">
+          <div class="growth-hero">
+            <div>
+              <span class="eyebrow">本周成长</span>
+              <h3 id="growth-title">正在生成周报…</h3>
+              <p id="growth-summary">完成趋势、连续天数与奖励确认会显示在这里。</p>
+            </div>
+            <div id="growth-ring" class="growth-ring"><span>--</span><small>周目标</small></div>
+          </div>
+          <div id="growth-days" class="growth-days"></div>
+          <div class="growth-metrics">
+            <div><strong id="growth-streak">--</strong><span>连续完成</span></div>
+            <div><strong id="growth-homework">--</strong><span>平均作业</span></div>
+            <div><strong id="growth-playtime">--</strong><span>平均余量</span></div>
+          </div>
+          <div class="reward-card">
+            <label for="weekly-reward-text">本周家庭奖励</label>
+            <input id="weekly-reward-text" class="setting-input" maxlength="80" placeholder="例如：周末一起去骑车">
+            <div class="inline-actions">
+              <button id="btn-approve-reward" class="btn btn-primary">确认奖励</button>
+              <button id="btn-redeem-reward" class="btn btn-secondary">标记已兑现</button>
+            </div>
+            <p id="reward-message" class="settings-message" aria-live="polite"></p>
+          </div>
+          <div class="reward-card protection-card">
+            <label for="protection-date">每周一次中断保护</label>
+            <p class="section-tip">生病、家庭安排等特殊情况可以保护连续记录，但不会虚增完成天数。</p>
+            <div class="protection-grid">
+              <input type="date" id="protection-date" class="setting-input">
+              <input type="text" id="protection-reason" class="setting-input" maxlength="80" placeholder="例如：生病休息">
+              <button id="btn-add-protection" class="btn btn-secondary">使用保护</button>
+            </div>
+            <p id="protection-message" class="settings-message" aria-live="polite"></p>
+          </div>
+        </div>
+
+        <div id="sync-section" class="parent-panel">
+          <div class="section-heading-row">
+            <div><span class="eyebrow">可靠同步</span><h3>离线队列与设备冲突</h3></div>
+            <button id="btn-flush-sync" class="btn btn-secondary">立即重试同步</button>
+          </div>
+          <div class="sync-summary-grid">
+            <div class="mini-status-card"><strong id="sync-online-state">--</strong><span>网络状态</span></div>
+            <div class="mini-status-card"><strong id="sync-queue-count">0</strong><span>待同步操作</span></div>
+            <div class="mini-status-card"><strong id="sync-conflict-count">0</strong><span>待处理冲突</span></div>
+          </div>
+          <div id="conflict-list" class="conflict-list"></div>
+        </div>
+
+        <div id="operations-section" class="parent-panel">
+          <div class="section-heading-row"><div><span class="eyebrow">生产保障</span><h3>运行与数据安全</h3></div><button id="btn-refresh-ops" class="btn btn-secondary">刷新状态</button></div>
+          <div id="operations-grid" class="operations-grid"><p>正在读取运行状态…</p></div>
+          <h4>最近敏感操作</h4>
+          <div id="audit-list" class="audit-list"></div>
+          <p class="section-tip">数据库备份由服务器脚本生成；恢复操作必须显式确认并在停机窗口执行。</p>
+        </div>
+
+        <div id="plan-section" class="parent-panel">
+          <div class="plan-hero">
+            <span class="eyebrow">付费意愿验证</span>
+            <h3>家庭版候选权益</h3>
+            <p>多孩子、提醒触达、成长周报、跨设备冲突处理与数据备份。本阶段不产生真实扣款。</p>
+            <div id="plan-status" class="plan-status">正在读取套餐状态…</div>
+          </div>
+          <div class="price-test-grid">
+            <button class="price-card" data-price="900"><strong>¥9/月</strong><span>轻量家庭版</span></button>
+            <button class="price-card featured" data-price="1900"><strong>¥19/月</strong><span>完整家庭版</span></button>
+            <button class="price-card" data-price="9900"><strong>¥99/年</strong><span>年度家庭版</span></button>
+          </div>
+          <textarea id="plan-feedback" class="setting-input plan-feedback" maxlength="300" placeholder="你最愿意为什么功能付费？"></textarea>
+          <div class="inline-actions"><button id="btn-start-trial" class="btn btn-primary">开启 14 天体验</button></div>
+          <p id="plan-message" class="settings-message" aria-live="polite"></p>
+          <div id="product-metrics" class="product-metrics"></div>
+        </div>
 
         <!-- 家庭成员 -->
         <div id="family-section" class="family-section" style="display:none;">
           <h3>👨‍👩‍👧 家庭成员</h3>
           <p class="section-tip">每个孩子拥有独立记录和作息；归档只隐藏档案，不会删除历史。</p>
+          <label class="setting-item switch-setting">
+            <span><strong>允许孩子自行切换档案</strong><small>关闭后，只有进入家庭启动台或家长模式才能换人。</small></span>
+            <input type="checkbox" id="allow-child-switch">
+          </label>
           <div id="family-profile-list" class="family-profile-list"></div>
           <div class="add-child-card">
             <div class="add-child-grid">
@@ -353,6 +463,35 @@
             <label for="setting-bedtime">工作日睡觉时间</label>
             <input type="time" id="setting-bedtime" class="setting-input">
           </div>
+          <div class="setting-subsection">
+            <h4>🔔 计划与提醒</h4>
+            <label class="setting-item switch-setting">
+              <span><strong>开启当日提醒</strong><small id="notification-status">尚未请求通知权限</small></span>
+              <input type="checkbox" id="setting-reminder-enabled">
+            </label>
+            <div class="setting-item">
+              <label for="setting-reminder-time">工作日开始提醒</label>
+              <input type="time" id="setting-reminder-time" class="setting-input" value="19:00">
+            </div>
+            <div class="setting-item">
+              <label for="setting-weekend-reminder-time">周末开始提醒</label>
+              <input type="time" id="setting-weekend-reminder-time" class="setting-input" value="19:00">
+            </div>
+            <div class="setting-item">
+              <label for="setting-pause-reminder">暂停过久提醒</label>
+              <select id="setting-pause-reminder" class="setting-input">
+                <option value="15">15 分钟</option><option value="30">30 分钟</option><option value="45">45 分钟</option><option value="60">60 分钟</option>
+              </select>
+            </div>
+            <button id="btn-test-notification" class="btn btn-secondary">发送测试提醒</button>
+            <p id="reminder-message" class="settings-message" aria-live="polite"></p>
+            <div id="reminder-history" class="reminder-history"></div>
+          </div>
+          <div class="setting-subsection">
+            <h4>⭐ 成长目标</h4>
+            <div class="setting-item"><label for="setting-weekly-goal">每周目标</label><select id="setting-weekly-goal" class="setting-input"><option value="3">3 天</option><option value="4">4 天</option><option value="5">5 天</option><option value="6">6 天</option><option value="7">7 天</option></select></div>
+            <div class="setting-item"><label for="setting-reward-text">达标奖励</label><input id="setting-reward-text" class="setting-input" maxlength="80"></div>
+          </div>
           <div class="setting-item">
             <label for="setting-weekend-bedtime">周末睡觉时间</label>
             <input type="time" id="setting-weekend-bedtime" class="setting-input">
@@ -364,6 +503,8 @@
           <div class="setting-actions">
             <button id="btn-save-settings" class="btn btn-primary">保存设置</button>
             <button id="btn-export" class="btn btn-secondary">📤 导出数据</button>
+            <button id="btn-import" class="btn btn-secondary">📥 恢复导入</button>
+            <input id="import-file" type="file" accept="application/json,.json" hidden>
             <button id="btn-clear-data" class="btn btn-danger">🗑️ 清空记录</button>
           </div>
         </div>
@@ -371,8 +512,8 @@
     </div>
   </div>
 
-  <script src="time-utils.js?v=9"></script>
-  <script src="api-service.js?v=9"></script>
-  <script src="app.js?v=9"></script>
+  <script src="time-utils.js?v=10"></script>
+  <script src="api-service.js?v=10"></script>
+  <script src="app.js?v=10"></script>
 </body>
 </html>

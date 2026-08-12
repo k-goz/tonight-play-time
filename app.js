@@ -328,6 +328,7 @@ const App = {
     // Initialize API service
     this.apiReady = false;
     this.currentSessionId = null;
+    this.currentSessionVersion = null;
     this.sessionPromise = null;
     this.lastPersistedBucket = -1;
     this.pendingLocalRecords = [];
@@ -337,6 +338,11 @@ const App = {
     this.activeChild = null;
     this.parentApprovalToken = null;
     this.parentModeTimer = null;
+    this.familyPreferences = { allow_child_switch: false };
+    this.sessionSyncPromise = Promise.resolve();
+    this.launcherInitial = false;
+    this.reminderTimer = null;
+    this.selectedPricePoint = null;
 
     this.bindEvents();
     this.bindAuthEvents();
@@ -414,6 +420,8 @@ const App = {
 
     // 家长数据页面
     document.getElementById('btn-stats').addEventListener('click', () => this.showStatsPage());
+    document.getElementById('btn-launcher').addEventListener('click', () => this.showFamilyLauncher(false));
+    document.getElementById('btn-launcher-parent').addEventListener('click', () => this.showStatsPage());
     document.getElementById('btn-back').addEventListener('click', () => this.hideStatsPage());
     document.getElementById('btn-pin').addEventListener('click', () => this.verifyPin());
     document.getElementById('pin-input').addEventListener('keydown', (e) => {
@@ -436,7 +444,39 @@ const App = {
       this.switchChild(Number(event.target.value));
     });
     document.getElementById('btn-add-child').addEventListener('click', () => this.addChildProfile());
+    document.getElementById('allow-child-switch').addEventListener('change', (event) => {
+      this.saveFamilyPreferences(event.target.checked);
+    });
+    document.getElementById('btn-test-notification').addEventListener('click', () => this.testNotification());
+    document.getElementById('btn-approve-reward').addEventListener('click', () => this.saveReward('approved'));
+    document.getElementById('btn-redeem-reward').addEventListener('click', () => this.saveReward('redeemed'));
+    document.getElementById('btn-add-protection').addEventListener('click', () => this.addStreakProtection());
+    document.getElementById('btn-flush-sync').addEventListener('click', async () => {
+      await API_SERVICE.flushOfflineQueue();
+      this.loadSyncCenter();
+    });
+    document.getElementById('btn-refresh-ops').addEventListener('click', () => this.loadOperations());
+    document.getElementById('btn-start-trial').addEventListener('click', () => this.startFamilyTrial());
+    document.querySelectorAll('.price-card').forEach(button => {
+      button.addEventListener('click', () => this.selectPricePoint(button));
+    });
+    document.querySelectorAll('.parent-nav-btn').forEach(button => {
+      button.addEventListener('click', () => this.navigateParentSection(button));
+    });
+    window.addEventListener('online', async () => {
+      this.updateSyncIndicator();
+      if (this.apiReady) {
+        await API_SERVICE.flushOfflineQueue();
+        await this.syncFromServer({ restoreToday: false });
+      }
+    });
+    window.addEventListener('offline', () => this.updateSyncIndicator());
+    window.addEventListener('sync-status', () => this.updateSyncIndicator());
+    window.addEventListener('sync-conflict', () => this.updateSyncIndicator(true));
+    window.addEventListener('sync-flushed', () => this.syncFromServer({ restoreToday: false }));
     document.getElementById('btn-export').addEventListener('click', () => this.exportData());
+    document.getElementById('btn-import').addEventListener('click', () => document.getElementById('import-file').click());
+    document.getElementById('import-file').addEventListener('change', event => this.importData(event.target.files[0]));
     const btnClearData = document.getElementById('btn-clear-data');
     if (btnClearData) {
       btnClearData.addEventListener('click', () => this.clearAllData());
@@ -571,12 +611,17 @@ const App = {
     this.pendingLocalSettings = localStorage.getItem(STORAGE_KEYS.SETTINGS)
       ? Storage.getLocalSettings()
       : null;
-    this.children = await API_SERVICE.getChildren();
+    [this.children, this.familyPreferences] = await Promise.all([
+      API_SERVICE.getChildren(),
+      API_SERVICE.getFamilyPreferences()
+    ]);
     const activeChildren = this.children.filter(child => !child.archived_at);
     if (activeChildren.length === 0) throw new Error('账号缺少可用的孩子档案');
 
     const savedChildId = Number(localStorage.getItem(`active_child_user_${this.user.user_id}`));
+    const deviceChildId = Number(localStorage.getItem(`device_default_child_${this.user.user_id}`));
     this.activeChild = activeChildren.find(child => child.id === Number(preferredChildId)) ||
+      activeChildren.find(child => child.id === deviceChildId) ||
       activeChildren.find(child => child.id === savedChildId) ||
       activeChildren.find(child => child.is_default) ||
       activeChildren[0];
@@ -606,6 +651,7 @@ const App = {
     this.pauseStart = null;
     this.frozenRemainingSeconds = null;
     this.currentSessionId = null;
+    this.currentSessionVersion = null;
     this.sessionPromise = null;
     this.lastPersistedBucket = -1;
     this.settings = Storage.getSettings();
@@ -618,12 +664,72 @@ const App = {
   enterApp() {
     document.getElementById('page-auth').classList.remove('active');
     document.getElementById('page-auth').style.display = 'none';
+    if (this.apiReady && this.children.length) {
+      const deviceDefault = localStorage.getItem(`device_default_child_${this.user.user_id}`);
+      if (!deviceDefault) return this.showFamilyLauncher(true);
+    }
+    this.enterChildApp();
+  },
+
+  enterChildApp() {
+    document.getElementById('page-launcher').classList.remove('active');
+    document.getElementById('page-launcher').style.display = 'none';
     document.getElementById('page-timer').classList.add('active');
     document.getElementById('page-timer').style.display = 'block';
+    this.launcherInitial = false;
+    this.updateSyncIndicator();
+    this.setupReminderScheduler();
+    if (this.apiReady) this.syncFromServer();
+  },
 
-    if (this.apiReady) {
-      this.syncFromServer();
+  showFamilyLauncher(initial = false) {
+    if (!this.apiReady) return;
+    this.launcherInitial = initial;
+    document.querySelectorAll('.page').forEach(page => {
+      page.classList.remove('active');
+      page.style.display = 'none';
+    });
+    const launcher = document.getElementById('page-launcher');
+    launcher.classList.add('active');
+    launcher.style.display = 'block';
+    document.getElementById('launcher-message').textContent = '';
+    document.getElementById('launcher-remember-child').checked = Boolean(
+      localStorage.getItem(`device_default_child_${this.user.user_id}`)
+    );
+    this.renderFamilyLauncher();
+  },
+
+  renderFamilyLauncher() {
+    const grid = document.getElementById('launcher-children');
+    grid.innerHTML = this.children.filter(child => !child.archived_at).map(child => {
+      const locked = !this.launcherInitial && !this.familyPreferences.allow_child_switch &&
+        child.id !== this.activeChild?.id && !API_SERVICE.hasParentAccess();
+      return `<button class="launcher-child${locked ? ' locked' : ''}" data-launcher-child="${child.id}">
+        <span class="avatar">${escapeHtml(child.avatar || '🌙')}</span>
+        <strong>${escapeHtml(child.name)}</strong>
+        <small>${locked ? '🔒 需要家长允许切换' : `今晚 ${escapeHtml(child.bedtime)} 睡觉 · 点击进入`}</small>
+      </button>`;
+    }).join('');
+    grid.querySelectorAll('[data-launcher-child]').forEach(button => {
+      button.addEventListener('click', () => this.chooseLauncherChild(Number(button.dataset.launcherChild)));
+    });
+  },
+
+  async chooseLauncherChild(childId) {
+    const child = this.children.find(item => item.id === childId && !item.archived_at);
+    if (!child) return;
+    if (!this.launcherInitial && !this.familyPreferences.allow_child_switch &&
+        childId !== this.activeChild?.id && !API_SERVICE.hasParentAccess()) {
+      document.getElementById('launcher-message').textContent = '家长已关闭孩子自行切换，请进入家长模式修改。';
+      return;
     }
+    if (document.getElementById('launcher-remember-child').checked) {
+      localStorage.setItem(`device_default_child_${this.user.user_id}`, String(childId));
+    } else {
+      localStorage.removeItem(`device_default_child_${this.user.user_id}`);
+    }
+    if (childId !== this.activeChild?.id) await this.switchChild(childId, { fromLauncher: true });
+    this.enterChildApp();
   },
 
   renderChildSwitcher() {
@@ -641,10 +747,17 @@ const App = {
     ).join('');
     avatar.textContent = this.activeChild.avatar || '🌙';
     switcher.style.display = 'flex';
+    selector.disabled = !this.familyPreferences.allow_child_switch && !API_SERVICE.hasParentAccess();
+    document.getElementById('btn-launcher').style.display = '';
   },
 
-  async switchChild(childId) {
+  async switchChild(childId, { fromLauncher = false } = {}) {
     if (!this.apiReady || childId === this.activeChild?.id) return;
+    if (!fromLauncher && !this.familyPreferences.allow_child_switch && !API_SERVICE.hasParentAccess()) {
+      alert('家长已关闭孩子自行切换，请从家长模式修改。');
+      this.renderChildSwitcher();
+      return;
+    }
     if (![STATE.IDLE, STATE.COMPLETED].includes(this.state)) {
       alert('当前孩子正在计时，请完成或重新开始后再切换。');
       this.renderChildSwitcher();
@@ -671,6 +784,7 @@ const App = {
       this.loadStatsData();
       this.loadSettings();
       this.renderFamilyProfiles();
+      this.loadPlatformPanels();
     }
   },
 
@@ -824,6 +938,12 @@ const App = {
         } else {
           this.restoreFromServerSession(todaySession);
         }
+      } else {
+        const localState = Storage.getTodayState();
+        if (localState && localState.date === today &&
+            [STATE.RUNNING, STATE.PAUSED, STATE.REVIEWING].includes(localState.state)) {
+          await this.syncCurrentSession();
+        }
       }
 
       console.log('Data synced from server');
@@ -913,6 +1033,7 @@ const App = {
   restoreFromServerSession(session, { showSurfaces = true } = {}) {
     const serverState = Object.values(STATE).includes(session.state) ? session.state : STATE.IDLE;
     this.state = session.completed ? STATE.COMPLETED : serverState;
+    this.currentSessionVersion = session.version || 1;
     this.startTime = session.start_time || null;
     this.homeworkSeconds = session.homework_seconds || session.homework_minutes * 60 || 0;
     this.pausedSeconds = session.paused_seconds || 0;
@@ -1009,6 +1130,7 @@ const App = {
         this.getCurrentBedtime()
       ).then(session => {
         this.currentSessionId = session.id;
+        this.currentSessionVersion = session.version || 1;
         return session.id;
       }).finally(() => {
         this.sessionPromise = null;
@@ -1019,7 +1141,7 @@ const App = {
 
   async syncCurrentSession(extra = {}, { approvalToken = null, throwOnError = false } = {}) {
     if (!this.apiReady) return;
-    try {
+    const performSync = async () => {
       const sessionId = await this.ensureServerSession();
       if (!sessionId) return;
       const payload = {
@@ -1032,12 +1154,21 @@ const App = {
         completed: this.state === STATE.COMPLETED,
         ...extra
       };
-      await API_SERVICE.updateSession(sessionId, payload, {
+      const result = await API_SERVICE.updateSession(sessionId, payload, {
         approvalToken,
-        requiresParent: this.state === STATE.COMPLETED && API_SERVICE.hasParentAccess()
+        requiresParent: this.state === STATE.COMPLETED && API_SERVICE.hasParentAccess(),
+        clientVersion: this.currentSessionVersion
       });
+      if (result?.version) this.currentSessionVersion = result.version;
+      this.updateSyncIndicator();
+    };
+    const queuedSync = this.sessionSyncPromise.catch(() => {}).then(performSync);
+    this.sessionSyncPromise = queuedSync;
+    try {
+      await queuedSync;
     } catch (error) {
       console.warn('Failed to sync current session:', error);
+      if (error.status === 409) this.updateSyncIndicator(true);
       if (throwOnError) throw error;
     }
   },
@@ -1814,6 +1945,8 @@ const App = {
   showStatsPage() {
     document.getElementById('page-timer').classList.remove('active');
     document.getElementById('page-timer').style.display = 'none';
+    document.getElementById('page-launcher').classList.remove('active');
+    document.getElementById('page-launcher').style.display = 'none';
 
     const page = document.getElementById('page-stats');
     page.style.display = '';
@@ -1892,6 +2025,7 @@ const App = {
       this.loadStatsData();
       this.loadSettings();
       this.renderFamilyProfiles();
+      this.loadPlatformPanels();
       this.scheduleParentModeLock();
     } catch (error) {
       document.getElementById('pin-area').style.display = '';
@@ -1921,6 +2055,8 @@ const App = {
       if (revoke) await API_SERVICE.lockParentAccess().catch(() => API_SERVICE.clearParentAccess());
       else API_SERVICE.clearParentAccess();
     }
+    this.renderChildSwitcher();
+    if (this.apiReady) this.renderFamilyLauncher();
     if (document.getElementById('page-stats').classList.contains('active')) this.hideStatsPage();
   },
 
@@ -2105,6 +2241,18 @@ const App = {
     const nameInput = document.getElementById('setting-child-name');
     nameItem.style.display = this.apiReady ? 'flex' : 'none';
     nameInput.value = this.activeChild?.name || '';
+    if (this.apiReady && this.activeChild) {
+      document.getElementById('allow-child-switch').checked = Boolean(this.familyPreferences.allow_child_switch);
+      document.getElementById('setting-reminder-enabled').checked = Boolean(this.activeChild.reminder_enabled);
+      document.getElementById('setting-reminder-time').value = this.activeChild.reminder_time || '19:00';
+      document.getElementById('setting-weekend-reminder-time').value =
+        this.activeChild.weekend_reminder_time || this.activeChild.reminder_time || '19:00';
+      document.getElementById('setting-pause-reminder').value = String(this.activeChild.pause_reminder_minutes || 30);
+      document.getElementById('setting-weekly-goal').value = String(this.activeChild.weekly_goal || 5);
+      document.getElementById('setting-reward-text').value =
+        this.activeChild.reward_text || '周末一起选一个亲子活动';
+      this.updateNotificationStatus();
+    }
   },
 
   async saveSettings() {
@@ -2112,6 +2260,12 @@ const App = {
     const weekendBedtime = document.getElementById('setting-weekend-bedtime').value;
     const pin = document.getElementById('setting-pin').value;
     const childName = document.getElementById('setting-child-name').value.trim();
+    const reminderEnabled = document.getElementById('setting-reminder-enabled').checked;
+    const reminderTime = document.getElementById('setting-reminder-time').value;
+    const weekendReminderTime = document.getElementById('setting-weekend-reminder-time').value;
+    const pauseReminderMinutes = Number(document.getElementById('setting-pause-reminder').value);
+    const weeklyGoal = Number(document.getElementById('setting-weekly-goal').value);
+    const rewardText = document.getElementById('setting-reward-text').value.trim();
     const btn = document.getElementById('btn-save-settings');
     const originalText = btn.textContent;
 
@@ -2138,26 +2292,34 @@ const App = {
     btn.textContent = this.apiReady ? '正在同步…' : '✅ 已保存';
     try {
       if (this.apiReady) {
+        if (reminderEnabled && 'Notification' in window && Notification.permission === 'default') {
+          await Notification.requestPermission();
+        }
         const payload = {
           bedtime: this.settings.bedtime,
           weekend_bedtime: this.settings.weekendBedtime
         };
         if (pin) payload.parent_pin = pin;
         await API_SERVICE.updateSettings(this.activeChild.id, payload);
-        if (childName !== this.activeChild.name ||
-            bedtime !== this.activeChild.bedtime ||
-            weekendBedtime !== (this.activeChild.weekend_bedtime || this.activeChild.bedtime)) {
-          this.activeChild = await API_SERVICE.updateChild(this.activeChild.id, {
-            name: childName,
-            bedtime: this.settings.bedtime,
-            weekend_bedtime: this.settings.weekendBedtime
-          });
-          this.children = this.children.map(child =>
-            child.id === this.activeChild.id ? this.activeChild : child
-          );
-          this.renderChildSwitcher();
-          this.renderFamilyProfiles();
-        }
+        this.activeChild = await API_SERVICE.updateChildCapabilities(this.activeChild.id, {
+          name: childName,
+          bedtime: this.settings.bedtime,
+          weekend_bedtime: this.settings.weekendBedtime,
+          reminder_enabled: reminderEnabled,
+          reminder_time: reminderTime,
+          weekend_reminder_time: weekendReminderTime,
+          pause_reminder_minutes: pauseReminderMinutes,
+          weekly_goal: weeklyGoal,
+          reward_text: rewardText || '周末一起选一个亲子活动'
+        });
+        this.children = this.children.map(child =>
+          child.id === this.activeChild.id ? this.activeChild : child
+        );
+        this.renderChildSwitcher();
+        this.renderFamilyProfiles();
+        this.setupReminderScheduler();
+        this.updateNotificationStatus();
+        await this.loadWeeklyInsights();
         if (this.currentSessionId || this.state !== STATE.IDLE) {
           await this.syncCurrentSession();
         }
@@ -2168,6 +2330,290 @@ const App = {
     } finally {
       btn.disabled = false;
       setTimeout(() => { btn.textContent = originalText; }, 2000);
+    }
+  },
+
+  async saveFamilyPreferences(allowChildSwitch) {
+    const message = document.getElementById('child-profile-message');
+    try {
+      await API_SERVICE.updateFamilyPreferences({ allow_child_switch: allowChildSwitch });
+      this.familyPreferences = { allow_child_switch: allowChildSwitch };
+      message.textContent = allowChildSwitch ? '孩子现在可以自行切换档案' : '孩子切换已锁定';
+      this.renderChildSwitcher();
+      this.renderFamilyLauncher();
+    } catch (error) {
+      document.getElementById('allow-child-switch').checked = !allowChildSwitch;
+      message.textContent = error.message;
+    }
+  },
+
+  updateNotificationStatus() {
+    const status = document.getElementById('notification-status');
+    if (!status) return;
+    if (!('Notification' in window)) status.textContent = '当前浏览器不支持系统通知，将显示应用内提示';
+    else if (Notification.permission === 'granted') status.textContent = '通知权限已开启；提醒在应用运行时调度';
+    else if (Notification.permission === 'denied') status.textContent = '通知已被浏览器阻止，请在站点设置中开启';
+    else status.textContent = '保存或测试时会请求通知权限';
+  },
+
+  setupReminderScheduler() {
+    if (this.reminderTimer) clearInterval(this.reminderTimer);
+    if (!this.apiReady || !this.activeChild?.reminder_enabled) return;
+    this.checkReminders();
+    this.reminderTimer = setInterval(() => this.checkReminders(), 30000);
+  },
+
+  async checkReminders() {
+    if (!this.activeChild?.reminder_enabled) return;
+    const now = TimeUtils.getBeijingNow();
+    const date = TimeUtils.getBeijingDateStr(now);
+    const time = TimeUtils.getBeijingTimeStr(now).slice(0, 5);
+    const reminderTime = TimeUtils.isWeekend(now)
+      ? this.activeChild.weekend_reminder_time || this.activeChild.reminder_time || '19:00'
+      : this.activeChild.reminder_time || '19:00';
+    if (this.state === STATE.IDLE && time === reminderTime) {
+      await this.sendReminderOnce(`${date}:daily`, 'daily_start', `🌙 ${this.activeChild.name}，今晚的小任务可以开始啦`, '现在开始，给睡前留出更多快乐时间。');
+    }
+    if (this.state === STATE.PAUSED && this.pauseStart) {
+      const pausedMinutes = (Date.now() - this.pauseStart) / 60000;
+      if (pausedMinutes >= (this.activeChild.pause_reminder_minutes || 30)) {
+        await this.sendReminderOnce(`${date}:pause:${this.startTime}`, 'pause_too_long', '⏸️ 休息得差不多啦', '回来继续一点点，很快就能完成。');
+      }
+    }
+    const remaining = TimeUtils.getSecondsToBedtime(this.getCurrentBedtime(now), now);
+    if ([STATE.RUNNING, STATE.PAUSED].includes(this.state) && remaining > 0 && remaining <= 15 * 60) {
+      await this.sendReminderOnce(`${date}:bedtime`, 'bedtime_near', '😴 离睡觉还有 15 分钟', '优先收尾，别让作业挤占睡眠时间。');
+    }
+  },
+
+  async sendReminderOnce(key, type, title, body) {
+    const storageKey = `reminder_sent_${this.user?.user_id || 'local'}_${this.activeChild?.id || 'default'}_${key}`;
+    if (localStorage.getItem(storageKey)) return;
+    const result = await this.sendNotification(type, title, body);
+    if (result === 'delivered') localStorage.setItem(storageKey, new Date().toISOString());
+  },
+
+  async sendNotification(type, title, body) {
+    let status = 'unsupported';
+    let detail = '浏览器不支持通知';
+    try {
+      if ('Notification' in window && Notification.permission === 'granted') {
+        const registration = await navigator.serviceWorker?.ready;
+        if (registration) await registration.showNotification(title, {
+          body, tag: `tonight-${type}`, icon: './icons/icon-192.png'
+        });
+        else new Notification(title, { body });
+        status = 'delivered';
+        detail = '系统通知已提交';
+      } else if ('Notification' in window && Notification.permission === 'denied') {
+        status = 'blocked';
+        detail = '浏览器已拒绝通知权限';
+        this.showTemporaryTip(`${title}：${body}`);
+      } else {
+        this.showTemporaryTip(`${title}：${body}`);
+      }
+    } catch (error) {
+      status = 'failed';
+      detail = error.message || '通知发送失败';
+      this.showTemporaryTip(`${title}：${body}`);
+    }
+    if (this.apiReady) {
+      await API_SERVICE.recordReminderEvent(this.activeChild.id, type, status, detail).catch(() => {});
+    }
+    return status;
+  },
+
+  async testNotification() {
+    const message = document.getElementById('reminder-message');
+    if ('Notification' in window && Notification.permission === 'default') {
+      await Notification.requestPermission();
+    }
+    this.updateNotificationStatus();
+    const status = await this.sendNotification('test', '🌙 提醒测试成功', `${this.activeChild.name} 的晚间计划已准备好。`);
+    message.textContent = status === 'delivered' ? '测试通知已发送' : '系统通知不可用，已使用应用内提示并记录原因';
+    await this.loadReminderHistory();
+  },
+
+  async loadReminderHistory() {
+    if (!this.apiReady) return;
+    const events = await API_SERVICE.getReminderEvents(this.activeChild.id);
+    const history = document.getElementById('reminder-history');
+    history.innerHTML = events.length ? events.slice(0, 5).map(event =>
+      `<div class="reminder-history-item"><strong>${escapeHtml({
+        delivered: '已触达', blocked: '已降级', unsupported: '应用内提示', failed: '发送失败'
+      }[event.status] || event.status)}</strong><span>${escapeHtml(event.event_type)} · ${escapeHtml(event.created_at)}</span></div>`
+    ).join('') : '<div class="reminder-history-item">还没有提醒触达记录</div>';
+  },
+
+  navigateParentSection(button) {
+    document.querySelectorAll('.parent-nav-btn').forEach(item => item.classList.remove('active'));
+    button.classList.add('active');
+    document.getElementById(button.dataset.parentTarget)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  },
+
+  async loadPlatformPanels() {
+    await Promise.allSettled([
+      this.loadWeeklyInsights(), this.loadSyncCenter(), this.loadOperations(), this.loadPlanPanel(),
+      this.loadReminderHistory()
+    ]);
+  },
+
+  async loadWeeklyInsights() {
+    if (!this.apiReady) return;
+    const insight = await API_SERVICE.getWeeklyInsights(this.activeChild.id);
+    const progress = Math.min(100, Math.round(insight.completed_days / insight.goal * 100));
+    document.getElementById('growth-title').textContent = insight.goal_reached
+      ? `目标达成：本周完成 ${insight.completed_days} 天`
+      : `本周完成 ${insight.completed_days}/${insight.goal} 天`;
+    document.getElementById('growth-summary').textContent = insight.previous_completed_days
+      ? `上周同期完成 ${insight.previous_completed_days} 天，保持稳定比追求满分更重要。`
+      : '从第一天开始积累，周目标由家长按家庭节奏设置。';
+    const ring = document.getElementById('growth-ring');
+    ring.style.setProperty('--progress', `${progress}%`);
+    ring.querySelector('span').textContent = `${insight.completed_days}/${insight.goal}`;
+    const daysByDate = new Map(insight.days.map(day => [day.date, day]));
+    document.getElementById('growth-days').innerHTML = Array.from({ length: 7 }, (_, index) => {
+      const date = new Date(`${insight.week_start}T12:00:00+08:00`);
+      date.setUTCDate(date.getUTCDate() + index);
+      const key = TimeUtils.getBeijingDateStr(date);
+      const day = daysByDate.get(key);
+      return `<div class="growth-day${day?.completed ? ' done' : ''}${day?.protected ? ' protected' : ''}"><span>${day?.completed ? '⭐' : day?.protected ? '🛡️' : '○'}</span><small>${key.slice(5)}</small></div>`;
+    }).join('');
+    document.getElementById('growth-streak').textContent = `${insight.streak_days} 天`;
+    document.getElementById('growth-homework').textContent = `${Math.round(insight.avg_homework_minutes)} 分`;
+    document.getElementById('growth-playtime').textContent = `${Math.round(insight.avg_playtime_minutes)} 分`;
+    document.getElementById('weekly-reward-text').value = insight.reward_text || '';
+    document.getElementById('reward-message').textContent = `当前状态：${{
+      pending: '待确认', approved: '已确认', redeemed: '已兑现'
+    }[insight.reward_status] || insight.reward_status}`;
+    const protectionButton = document.getElementById('btn-add-protection');
+    document.getElementById('protection-date').value = TimeUtils.getBeijingDateStr();
+    protectionButton.disabled = !insight.protection_available;
+    document.getElementById('protection-message').textContent = insight.protected_date
+      ? `本周已保护 ${insight.protected_date}，连续记录不会因这一天中断。`
+      : '本周还有 1 次保护可用。';
+  },
+
+  async saveReward(status) {
+    const rewardText = document.getElementById('weekly-reward-text').value.trim();
+    const message = document.getElementById('reward-message');
+    if (!rewardText) return message.textContent = '请先填写奖励内容';
+    try {
+      await API_SERVICE.saveWeeklyReward(this.activeChild.id, rewardText, status);
+      message.textContent = status === 'redeemed' ? '奖励已标记兑现' : '奖励已由家长确认';
+      await this.loadWeeklyInsights();
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  },
+
+  async addStreakProtection() {
+    const date = document.getElementById('protection-date').value;
+    const reason = document.getElementById('protection-reason').value.trim();
+    const message = document.getElementById('protection-message');
+    if (!date || !reason) return message.textContent = '请选择日期并填写原因';
+    try {
+      await API_SERVICE.addStreakProtection(this.activeChild.id, date, reason);
+      message.textContent = '中断保护已生效';
+      await this.loadWeeklyInsights();
+    } catch (error) {
+      message.textContent = error.message;
+    }
+  },
+
+  updateSyncIndicator(conflict = false) {
+    const indicator = document.getElementById('sync-indicator');
+    const pending = API_SERVICE.offlineQueue?.length || 0;
+    indicator.classList.toggle('offline', !navigator.onLine);
+    indicator.classList.toggle('pending', navigator.onLine && (pending > 0 || conflict));
+    indicator.textContent = !navigator.onLine ? '● 离线记录中' :
+      pending > 0 || conflict ? `● ${pending || 1} 项待处理` : '● 已同步';
+  },
+
+  async loadSyncCenter() {
+    document.getElementById('sync-online-state').textContent = navigator.onLine ? '在线' : '离线';
+    document.getElementById('sync-queue-count').textContent = String(API_SERVICE.offlineQueue.length);
+    if (!this.apiReady) return;
+    const conflicts = await API_SERVICE.getSyncConflicts();
+    document.getElementById('sync-conflict-count').textContent = String(conflicts.length);
+    const list = document.getElementById('conflict-list');
+    list.innerHTML = conflicts.length ? conflicts.map(conflict => `
+      <div class="conflict-item">
+        <strong>${escapeHtml(conflict.child_name)} · ${escapeHtml(conflict.date)}</strong>
+        <p>设备版本 ${conflict.base_version}，云端版本 ${conflict.server_version}</p>
+        <div class="conflict-actions">
+          <button class="btn btn-secondary" data-conflict="${conflict.id}" data-resolution="server">保留云端</button>
+          <button class="btn btn-primary" data-conflict="${conflict.id}" data-resolution="client">采用本设备</button>
+        </div>
+      </div>`).join('') : '<div class="conflict-item">✅ 当前没有待处理冲突</div>';
+    list.querySelectorAll('[data-conflict]').forEach(button => {
+      button.addEventListener('click', async () => {
+        await API_SERVICE.resolveSyncConflict(Number(button.dataset.conflict), button.dataset.resolution);
+        await this.loadSyncCenter();
+        await this.syncFromServer({ restoreToday: false });
+      });
+    });
+    this.updateSyncIndicator(conflicts.length > 0);
+  },
+
+  async loadOperations() {
+    if (!this.apiReady) return;
+    const [status, logs] = await Promise.all([API_SERVICE.getOperationsStatus(), API_SERVICE.getAuditLogs()]);
+    const values = [
+      ['数据库', status.database_integrity], ['Schema', `V${status.schema_version}`],
+      ['待处理冲突', status.pending_conflicts], ['可见备份', status.backup_count],
+      ['最新备份', status.latest_backup || '尚未生成'], ['运行时间', `${status.uptime_seconds}s`]
+    ];
+    document.getElementById('operations-grid').innerHTML = values.map(([label, value]) =>
+      `<div class="operation-card"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`
+    ).join('');
+    document.getElementById('audit-list').innerHTML = logs.length ? logs.map(log =>
+      `<div class="audit-item"><strong>${escapeHtml(log.action)}</strong><span>${escapeHtml(log.created_at)}</span></div>`
+    ).join('') : '<div class="audit-item">暂无敏感操作记录</div>';
+  },
+
+  async loadPlanPanel() {
+    if (!this.apiReady) return;
+    const [plan, metrics] = await Promise.all([API_SERVICE.getPlan(), API_SERVICE.getProductMetrics()]);
+    document.getElementById('plan-status').textContent = plan.plan_tier === 'free'
+      ? '当前：免费版 · 尚未开启体验'
+      : `当前：家庭版体验${plan.trial_ends_at ? ` · 至 ${plan.trial_ends_at.slice(0, 10)}` : ''}`;
+    const funnel = metrics.funnel || {};
+    const funnelRows = [
+      ['完成激活', funnel.activated ? '是' : '否'],
+      ['近7天家庭使用', `${funnel.sessions_last_7_days || 0} 次`],
+      ['7日留存', funnel.retained_7d ? '已形成' : '观察中'],
+      ['付费意向', funnel.purchase_intent ? '已表达' : '未表达']
+    ];
+    document.getElementById('product-metrics').innerHTML = funnelRows.map(([label, value]) =>
+      `<div class="metric-item"><strong>${escapeHtml(value)}</strong><span>${escapeHtml(label)}</span></div>`
+    ).join('') + (metrics.events.length ? metrics.events.map(metric =>
+      `<div class="metric-item"><strong>${escapeHtml(metric.event_type)}：${metric.count}</strong><span>最近 ${escapeHtml(metric.latest)}</span></div>`
+    ).join('') : '');
+  },
+
+  async selectPricePoint(button) {
+    document.querySelectorAll('.price-card').forEach(item => item.classList.remove('selected'));
+    button.classList.add('selected');
+    this.selectedPricePoint = Number(button.dataset.price);
+    const feedback = document.getElementById('plan-feedback').value.trim();
+    try {
+      await API_SERVICE.recordProductEvent('purchase_intent', this.selectedPricePoint, feedback);
+      document.getElementById('plan-message').textContent = '已记录你的价格偏好，不会产生扣款。';
+      await this.loadPlanPanel();
+    } catch (error) {
+      document.getElementById('plan-message').textContent = error.message;
+    }
+  },
+
+  async startFamilyTrial() {
+    const message = document.getElementById('plan-message');
+    try {
+      await API_SERVICE.startFamilyTrial();
+      message.textContent = '14 天家庭版体验已开启，不会自动扣款。';
+      await this.loadPlanPanel();
+    } catch (error) {
+      message.textContent = error.message;
     }
   },
 
@@ -2189,6 +2635,38 @@ const App = {
     a.download = `homework-data${childLabel}-${TimeUtils.getBeijingDateStr()}.json`;
     a.click();
     URL.revokeObjectURL(url);
+  },
+
+  async importData(file) {
+    const input = document.getElementById('import-file');
+    if (!file) return;
+    try {
+      if (file.size > 1024 * 1024) throw new Error('导入文件不能超过 1MB');
+      const payload = JSON.parse(await file.text());
+      if (!payload || !Array.isArray(payload.records) || payload.records.length > 100) {
+        throw new Error('请选择本应用导出的 JSON 文件，且记录不超过 100 条');
+      }
+      const records = payload.records.filter(record => record && /^\d{4}-\d{2}-\d{2}$/.test(record.date || ''));
+      if (records.length !== payload.records.length) throw new Error('导入文件包含无效日期');
+      if (this.apiReady) {
+        const result = await API_SERVICE.importSessions(
+          this.activeChild.id,
+          records.map(record => this.localRecordToImport(record))
+        );
+        await this.syncFromServer({ restoreToday: false });
+        alert(`恢复完成：导入 ${result.imported} 条，跳过 ${result.skipped} 条已有完成记录。`);
+      } else {
+        const existing = new Map(Storage.getRecords().map(record => [record.date, record]));
+        records.forEach(record => { if (!existing.has(record.date)) existing.set(record.date, record); });
+        Storage.saveRecords([...existing.values()].sort((a, b) => a.date.localeCompare(b.date)));
+        this.loadStatsData();
+        alert(`恢复完成：当前共有 ${existing.size} 条记录。`);
+      }
+    } catch (error) {
+      alert(error.message || '导入失败，请检查文件格式');
+    } finally {
+      input.value = '';
+    }
   },
 
   async clearAllData() {

@@ -3,14 +3,14 @@
  * 提供离线缓存支持
  */
 
-const CACHE_NAME = 'homework-timer-v9';
+const CACHE_NAME = 'homework-timer-v10';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
-  './style.css?v=9',
-  './time-utils.js?v=9',
-  './app.js?v=9',
-  './api-service.js?v=9',
+  './style.css?v=10',
+  './time-utils.js?v=10',
+  './app.js?v=10',
+  './api-service.js?v=10',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png'
@@ -62,5 +62,27 @@ self.addEventListener('fetch', (event) => {
         }
         return new Response('Offline', { status: 503, statusText: 'Offline' });
       })
+  );
+});
+
+self.addEventListener('message', (event) => {
+  if (event.data?.type !== 'SHOW_REMINDER') return;
+  const { title, body, tag } = event.data;
+  event.waitUntil(self.registration.showNotification(title, {
+    body,
+    tag: tag || 'family-reminder',
+    icon: './icons/icon-192.png',
+    badge: './icons/icon-192.png',
+    data: { url: './' }
+  }));
+});
+
+self.addEventListener('notificationclick', (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clients) => {
+      const existing = clients.find(client => 'focus' in client);
+      return existing ? existing.focus() : self.clients.openWindow('./');
+    })
   );
 });

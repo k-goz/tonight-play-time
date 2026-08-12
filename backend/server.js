@@ -38,6 +38,150 @@ function addColumn(table, column, definition) {
   });
 }
 
+const PLATFORM_TABLES_SQL = `
+  CREATE TABLE IF NOT EXISTS family_preferences (
+    user_id INTEGER PRIMARY KEY,
+    allow_child_switch BOOLEAN NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE TABLE IF NOT EXISTS weekly_rewards (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    child_id INTEGER NOT NULL,
+    week_start TEXT NOT NULL,
+    reward_text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending', 'approved', 'redeemed')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_id) REFERENCES child_profiles(id) ON DELETE CASCADE,
+    UNIQUE (user_id, child_id, week_start)
+  );
+  CREATE TABLE IF NOT EXISTS streak_protections (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    child_id INTEGER NOT NULL,
+    protected_date TEXT NOT NULL,
+    week_start TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_id) REFERENCES child_profiles(id) ON DELETE CASCADE,
+    UNIQUE (user_id, child_id, protected_date)
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_streak_protections_week
+    ON streak_protections(user_id, child_id, week_start);
+  CREATE TABLE IF NOT EXISTS reminder_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    child_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_id) REFERENCES child_profiles(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_reminder_events_child
+    ON reminder_events(user_id, child_id, created_at);
+  CREATE TABLE IF NOT EXISTS sync_conflicts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    child_id INTEGER NOT NULL,
+    session_id INTEGER NOT NULL,
+    device_id TEXT,
+    base_version INTEGER NOT NULL,
+    server_version INTEGER NOT NULL,
+    client_payload TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending'
+      CHECK (status IN ('pending', 'resolved_server', 'resolved_client')),
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    resolved_at DATETIME,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (child_id) REFERENCES child_profiles(id) ON DELETE CASCADE,
+    FOREIGN KEY (session_id) REFERENCES homework_sessions(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_sync_conflicts_user
+    ON sync_conflicts(user_id, status, created_at);
+  CREATE TABLE IF NOT EXISTS audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    action TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id TEXT,
+    metadata TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_audit_logs_user
+    ON audit_logs(user_id, created_at);
+  CREATE TABLE IF NOT EXISTS product_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    plan_code TEXT,
+    price_point INTEGER,
+    metadata TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+  CREATE INDEX IF NOT EXISTS idx_product_events_user
+    ON product_events(user_id, event_type, created_at);
+`;
+
+function migrateToPlatformSchema(resolve, reject) {
+  db.all('PRAGMA table_info(child_profiles)', (childError, childColumns = []) => {
+    if (childError) return reject(childError);
+    db.all('PRAGMA table_info(homework_sessions)', (sessionError, sessionColumns = []) => {
+      if (sessionError) return reject(sessionError);
+      db.all('PRAGMA table_info(users)', (userError, userColumns = []) => {
+        if (userError) return reject(userError);
+        const childNames = new Set(childColumns.map(column => column.name));
+        const sessionNames = new Set(sessionColumns.map(column => column.name));
+        const userNames = new Set(userColumns.map(column => column.name));
+        const statements = [];
+        if (!childNames.has('reminder_enabled')) {
+          statements.push('ALTER TABLE child_profiles ADD COLUMN reminder_enabled BOOLEAN NOT NULL DEFAULT 0');
+        }
+        if (!childNames.has('reminder_time')) {
+          statements.push("ALTER TABLE child_profiles ADD COLUMN reminder_time TEXT NOT NULL DEFAULT '19:00'");
+        }
+        if (!childNames.has('weekend_reminder_time')) {
+          statements.push("ALTER TABLE child_profiles ADD COLUMN weekend_reminder_time TEXT NOT NULL DEFAULT '19:00'");
+        }
+        if (!childNames.has('pause_reminder_minutes')) {
+          statements.push('ALTER TABLE child_profiles ADD COLUMN pause_reminder_minutes INTEGER NOT NULL DEFAULT 30');
+        }
+        if (!childNames.has('weekly_goal')) {
+          statements.push('ALTER TABLE child_profiles ADD COLUMN weekly_goal INTEGER NOT NULL DEFAULT 5');
+        }
+        if (!childNames.has('reward_text')) {
+          statements.push("ALTER TABLE child_profiles ADD COLUMN reward_text TEXT NOT NULL DEFAULT '周末一起选一个亲子活动'");
+        }
+        if (!sessionNames.has('version')) {
+          statements.push('ALTER TABLE homework_sessions ADD COLUMN version INTEGER NOT NULL DEFAULT 1');
+        }
+        if (!userNames.has('plan_tier')) {
+          statements.push("ALTER TABLE users ADD COLUMN plan_tier TEXT NOT NULL DEFAULT 'free'");
+        }
+        if (!userNames.has('trial_started_at')) {
+          statements.push('ALTER TABLE users ADD COLUMN trial_started_at DATETIME');
+        }
+        statements.push(PLATFORM_TABLES_SQL);
+        statements.push('PRAGMA user_version = 5');
+
+        db.exec(`BEGIN IMMEDIATE; ${statements.join('; ')}; COMMIT;`, (error) => {
+          if (!error) return resolve();
+          db.run('ROLLBACK', () => reject(error));
+        });
+      });
+    });
+  });
+}
+
 function migrateToFamilySchema(resolve, reject) {
   const migrationSql = `
     BEGIN IMMEDIATE;
@@ -153,7 +297,7 @@ function migrateToFamilySchema(resolve, reject) {
   `;
 
   db.exec(migrationSql, (error) => {
-    if (!error) return resolve();
+    if (!error) return migrateToPlatformSchema(resolve, reject);
     db.run('ROLLBACK', () => reject(error));
   });
 }
@@ -186,7 +330,7 @@ function migrateToRulesSchema(resolve, reject) {
     statements.push('PRAGMA user_version = 4');
 
     db.exec(`BEGIN IMMEDIATE; ${statements.join('; ')}; COMMIT;`, (error) => {
-      if (!error) return resolve();
+      if (!error) return migrateToPlatformSchema(resolve, reject);
       db.run('ROLLBACK', () => reject(error));
     });
   });
@@ -209,7 +353,7 @@ function migrateToParentAccessSchema(resolve, reject) {
     PRAGMA user_version = 4;
     COMMIT;
   `, (error) => {
-    if (!error) return resolve();
+    if (!error) return migrateToPlatformSchema(resolve, reject);
     db.run('ROLLBACK', () => reject(error));
   });
 }
@@ -285,6 +429,7 @@ const databaseReady = new Promise((resolve, reject) => {
       if ((row?.user_version || 0) < 2) return migrateToFamilySchema(resolve, reject);
       if ((row?.user_version || 0) < 3) return migrateToRulesSchema(resolve, reject);
       if ((row?.user_version || 0) < 4) return migrateToParentAccessSchema(resolve, reject);
+      if ((row?.user_version || 0) < 5) return migrateToPlatformSchema(resolve, reject);
 
       db.exec(`
         CREATE TABLE IF NOT EXISTS child_profiles (
@@ -317,6 +462,7 @@ const databaseReady = new Promise((resolve, reject) => {
         );
         CREATE INDEX IF NOT EXISTS idx_parent_grants_user
           ON parent_grants(user_id);
+        ${PLATFORM_TABLES_SQL}
       `, (schemaError) => schemaError ? reject(schemaError) : resolve());
     });
   });
@@ -421,6 +567,50 @@ function parentAuth(req, res, next) {
     if (!valid) return res.status(403).json({ detail: '请先验证家长密码' });
     next();
   });
+}
+
+const rateLimitBuckets = new Map();
+function rateLimit({ windowMs, max, key }) {
+  return (req, res, next) => {
+    const bucketKey = key(req);
+    const now = Date.now();
+    if (rateLimitBuckets.size > 5000) {
+      for (const [storedKey, storedBucket] of rateLimitBuckets) {
+        if (storedBucket.resetAt <= now) rateLimitBuckets.delete(storedKey);
+      }
+    }
+    const bucket = rateLimitBuckets.get(bucketKey);
+    if (!bucket || bucket.resetAt <= now) {
+      rateLimitBuckets.set(bucketKey, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    bucket.count += 1;
+    if (bucket.count > max) {
+      res.set('Retry-After', String(Math.ceil((bucket.resetAt - now) / 1000)));
+      return res.status(429).json({ detail: '操作过于频繁，请稍后再试' });
+    }
+    next();
+  };
+}
+
+const loginRateLimit = rateLimit({
+  windowMs: 10 * 60 * 1000,
+  max: 20,
+  key: req => `login:${req.ip}`
+});
+const pinRateLimit = rateLimit({
+  windowMs: 5 * 60 * 1000,
+  max: 12,
+  key: req => `pin:${req.userId}:${req.ip}`
+});
+
+function audit(userId, action, entityType = null, entityId = null, metadata = null) {
+  db.run(
+    `INSERT INTO audit_logs (user_id, action, entity_type, entity_id, metadata)
+     VALUES (?, ?, ?, ?, ?)`,
+    [userId || null, action, entityType, entityId ? String(entityId) : null,
+      metadata ? JSON.stringify(metadata) : null]
+  );
 }
 
 function auth(req, res, next) {
@@ -581,7 +771,7 @@ app.post('/api/auth/register', (req, res) => {
   });
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', loginRateLimit, (req, res) => {
   const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
   const password = req.body.password;
   if (!username || typeof password !== 'string') {
@@ -600,6 +790,7 @@ app.post('/api/auth/login', (req, res) => {
 
     createToken(user.id, (tokenError, token) => {
       if (tokenError) return res.status(500).json({ detail: '登录状态创建失败' });
+      audit(user.id, 'auth.login');
       res.json({ access_token: token, user_id: user.id, nickname: user.nickname });
     });
   });
@@ -627,9 +818,7 @@ app.get('/api/auth/me', auth, (req, res) => {
 
 app.get('/api/children', auth, (req, res) => {
   db.all(
-    `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
-       created_at, updated_at
-     FROM child_profiles WHERE user_id = ?
+    `SELECT * FROM child_profiles WHERE user_id = ?
      ORDER BY archived_at IS NOT NULL, is_default DESC, id ASC`,
     [req.userId],
     (error, children) => {
@@ -664,9 +853,7 @@ app.post('/api/children', auth, parentAuth, (req, res) => {
       function onInsert(error) {
         if (error) return res.status(500).json({ detail: '孩子档案创建失败' });
         db.get(
-          `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
-             created_at, updated_at
-           FROM child_profiles WHERE id = ? AND user_id = ?`,
+          `SELECT * FROM child_profiles WHERE id = ? AND user_id = ?`,
           [this.lastID, req.userId],
           (readError, child) => {
             if (readError) return res.status(500).json({ detail: '孩子档案读取失败' });
@@ -681,7 +868,10 @@ app.post('/api/children', auth, parentAuth, (req, res) => {
 app.put('/api/children/:id', auth, parentAuth, (req, res) => {
   const childId = parsePositiveId(req.params.id);
   if (!childId) return res.status(400).json({ detail: '孩子档案编号不正确' });
-  const allowed = new Set(['name', 'avatar', 'bedtime', 'weekend_bedtime']);
+  const allowed = new Set([
+    'name', 'avatar', 'bedtime', 'weekend_bedtime', 'reminder_enabled',
+    'reminder_time', 'weekend_reminder_time', 'pause_reminder_minutes', 'weekly_goal', 'reward_text'
+  ]);
   const keys = Object.keys(req.body || {});
   if (keys.length === 0 || keys.some(key => !allowed.has(key))) {
     return res.status(400).json({ detail: '孩子档案字段不正确' });
@@ -713,6 +903,47 @@ app.put('/api/children/:id', auth, parentAuth, (req, res) => {
     assignments.push('weekend_bedtime = ?');
     values.push(req.body.weekend_bedtime);
   }
+  if (req.body.reminder_enabled !== undefined) {
+    if (typeof req.body.reminder_enabled !== 'boolean') {
+      return res.status(400).json({ detail: '提醒开关必须是布尔值' });
+    }
+    assignments.push('reminder_enabled = ?');
+    values.push(req.body.reminder_enabled ? 1 : 0);
+  }
+  if (req.body.reminder_time !== undefined) {
+    if (!validBedtime(req.body.reminder_time)) return res.status(400).json({ detail: '提醒时间格式不正确' });
+    assignments.push('reminder_time = ?');
+    values.push(req.body.reminder_time);
+  }
+  if (req.body.weekend_reminder_time !== undefined) {
+    if (!validBedtime(req.body.weekend_reminder_time)) {
+      return res.status(400).json({ detail: '周末提醒时间格式不正确' });
+    }
+    assignments.push('weekend_reminder_time = ?');
+    values.push(req.body.weekend_reminder_time);
+  }
+  if (req.body.pause_reminder_minutes !== undefined) {
+    const minutes = Number(req.body.pause_reminder_minutes);
+    if (!Number.isInteger(minutes) || minutes < 5 || minutes > 120) {
+      return res.status(400).json({ detail: '暂停提醒需为5-120分钟' });
+    }
+    assignments.push('pause_reminder_minutes = ?');
+    values.push(minutes);
+  }
+  if (req.body.weekly_goal !== undefined) {
+    const goal = Number(req.body.weekly_goal);
+    if (!Number.isInteger(goal) || goal < 1 || goal > 7) {
+      return res.status(400).json({ detail: '周目标需为1-7天' });
+    }
+    assignments.push('weekly_goal = ?');
+    values.push(goal);
+  }
+  if (req.body.reward_text !== undefined) {
+    const rewardText = typeof req.body.reward_text === 'string' ? req.body.reward_text.trim() : '';
+    if (!rewardText || rewardText.length > 80) return res.status(400).json({ detail: '奖励内容需为1-80个字符' });
+    assignments.push('reward_text = ?');
+    values.push(rewardText);
+  }
 
   assignments.push('updated_at = CURRENT_TIMESTAMP');
   values.push(childId, req.userId);
@@ -724,9 +955,7 @@ app.put('/api/children/:id', auth, parentAuth, (req, res) => {
       if (error) return res.status(500).json({ detail: '孩子档案保存失败' });
       if (this.changes === 0) return res.status(404).json({ detail: '孩子档案不存在' });
       db.get(
-        `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
-           created_at, updated_at
-         FROM child_profiles WHERE id = ? AND user_id = ?`,
+        `SELECT * FROM child_profiles WHERE id = ? AND user_id = ?`,
         [childId, req.userId],
         (readError, child) => {
           if (readError) return res.status(500).json({ detail: '孩子档案读取失败' });
@@ -764,9 +993,7 @@ app.post('/api/children/:id/archive', auth, parentAuth, (req, res) => {
             if (updateError) return res.status(500).json({ detail: archived ? '档案归档失败' : '档案恢复失败' });
             if (this.changes === 0) return res.status(404).json({ detail: '孩子档案不存在' });
             db.get(
-              `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
-                 created_at, updated_at
-               FROM child_profiles WHERE id = ? AND user_id = ?`,
+              `SELECT * FROM child_profiles WHERE id = ? AND user_id = ?`,
               [childId, req.userId],
               (updatedError, updated) => {
                 if (updatedError) return res.status(500).json({ detail: '孩子档案读取失败' });
@@ -889,7 +1116,7 @@ app.put('/api/settings', auth, parentAuth, (req, res) => {
   });
 });
 
-app.post('/api/settings/verify-pin', auth, (req, res) => {
+app.post('/api/settings/verify-pin', auth, pinRateLimit, (req, res) => {
   const pin = req.body.parent_pin;
   const purpose = req.body.purpose || 'manage';
   if (!validPin(pin)) return res.status(400).json({ detail: '家长密码必须是4位数字' });
@@ -908,7 +1135,10 @@ app.post('/api/settings/verify-pin', auth, (req, res) => {
         ? verifyPassword(pin, user.parent_pin_hash)
         : pin === (user.pin_code || '1234');
 
-      if (!valid) return res.json({ valid: false });
+      if (!valid) {
+        audit(req.userId, 'parent.pin_failed', 'user', req.userId, { purpose });
+        return res.json({ valid: false });
+      }
 
       if (!user.parent_pin_hash) {
         db.run(
@@ -919,6 +1149,7 @@ app.post('/api/settings/verify-pin', auth, (req, res) => {
 
       createParentGrant(req.userId, purpose, (grantError, grant) => {
         if (grantError) return res.status(500).json({ detail: '家长授权创建失败' });
+        audit(req.userId, 'parent.grant_created', 'user', req.userId, { purpose });
         const tokenField = purpose === 'manage' ? 'parent_token' : 'approval_token';
         res.json({ valid: true, [tokenField]: grant.token, expires_at: grant.expiresAt });
       });
@@ -935,6 +1166,348 @@ app.delete('/api/settings/parent-access', auth, parentAuth, (req, res) => {
       res.json({ message: '已退出家长模式' });
     }
   );
+});
+
+// ==================== Family Launcher & Preferences ====================
+
+app.get('/api/family/preferences', auth, (req, res) => {
+  db.run(
+    `INSERT INTO family_preferences (user_id) VALUES (?)
+     ON CONFLICT(user_id) DO NOTHING`,
+    [req.userId],
+    (insertError) => {
+      if (insertError) return res.status(500).json({ detail: '家庭偏好读取失败' });
+      db.get(
+        'SELECT allow_child_switch FROM family_preferences WHERE user_id = ?',
+        [req.userId],
+        (error, row) => {
+          if (error) return res.status(500).json({ detail: '家庭偏好读取失败' });
+          res.json({ allow_child_switch: Boolean(row?.allow_child_switch) });
+        }
+      );
+    }
+  );
+});
+
+app.put('/api/family/preferences', auth, parentAuth, (req, res) => {
+  if (typeof req.body.allow_child_switch !== 'boolean') {
+    return res.status(400).json({ detail: '孩子切换权限必须是布尔值' });
+  }
+  db.run(
+    `INSERT INTO family_preferences (user_id, allow_child_switch)
+     VALUES (?, ?)
+     ON CONFLICT(user_id) DO UPDATE SET
+       allow_child_switch = excluded.allow_child_switch,
+       updated_at = CURRENT_TIMESTAMP`,
+    [req.userId, req.body.allow_child_switch ? 1 : 0],
+    (error) => {
+      if (error) return res.status(500).json({ detail: '家庭偏好保存失败' });
+      audit(req.userId, 'family.preferences_updated', 'user', req.userId, req.body);
+      res.json({ saved: true, allow_child_switch: req.body.allow_child_switch });
+    }
+  );
+});
+
+// ==================== Reminders ====================
+
+const REMINDER_TYPES = new Set(['daily_start', 'pause_too_long', 'bedtime_near', 'test']);
+const REMINDER_STATUSES = new Set(['delivered', 'blocked', 'unsupported', 'failed']);
+
+app.post('/api/reminders/events', auth, (req, res) => {
+  if (!REMINDER_TYPES.has(req.body.event_type) || !REMINDER_STATUSES.has(req.body.status)) {
+    return res.status(400).json({ detail: '提醒事件格式不正确' });
+  }
+  if (!shortText(req.body.detail, 200)) return res.status(400).json({ detail: '提醒说明过长' });
+  resolveOwnedChild(req.userId, req.body.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.run(
+      `INSERT INTO reminder_events (user_id, child_id, event_type, status, detail)
+       VALUES (?, ?, ?, ?, ?)`,
+      [req.userId, child.id, req.body.event_type, req.body.status, req.body.detail || null],
+      function onInsert(error) {
+        if (error) return res.status(500).json({ detail: '提醒状态记录失败' });
+        res.status(201).json({ id: this.lastID, recorded: true });
+      }
+    );
+  });
+});
+
+app.get('/api/reminders/events', auth, parentAuth, (req, res) => {
+  resolveOwnedChild(req.userId, req.query.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.all(
+      `SELECT id, event_type, status, detail, created_at FROM reminder_events
+       WHERE user_id = ? AND child_id = ? ORDER BY id DESC LIMIT 20`,
+      [req.userId, child.id],
+      (error, rows) => {
+        if (error) return res.status(500).json({ detail: '提醒状态读取失败' });
+        res.json(rows || []);
+      }
+    );
+  });
+});
+
+function beijingDateString(date = new Date()) {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit'
+  }).format(date);
+}
+
+function addDateDays(dateString, days) {
+  const date = new Date(`${dateString}T12:00:00+08:00`);
+  date.setUTCDate(date.getUTCDate() + days);
+  return beijingDateString(date);
+}
+
+function currentWeekStart() {
+  const today = beijingDateString();
+  const date = new Date(`${today}T12:00:00+08:00`);
+  return addDateDays(today, -date.getUTCDay());
+}
+
+function calculateStreak(sessions, protections = []) {
+  const completedDates = new Set(sessions.filter(row => row.completed).map(row => row.date));
+  const protectedDates = new Set(protections.map(row => row.protected_date));
+  let cursor = beijingDateString();
+  if (!completedDates.has(cursor)) cursor = addDateDays(cursor, -1);
+  let streak = 0;
+  while ((completedDates.has(cursor) || protectedDates.has(cursor)) && streak < 365) {
+    if (completedDates.has(cursor)) streak += 1;
+    cursor = addDateDays(cursor, -1);
+  }
+  return streak;
+}
+
+// ==================== Growth & Weekly Report ====================
+
+app.get('/api/insights/weekly', auth, parentAuth, (req, res) => {
+  resolveOwnedChild(req.userId, req.query.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    const weekStart = currentWeekStart();
+    const previousWeekStart = addDateDays(weekStart, -7);
+    db.all(
+      `SELECT * FROM homework_sessions
+       WHERE user_id = ? AND child_id = ? AND date >= ? ORDER BY date ASC`,
+      [req.userId, child.id, addDateDays(weekStart, -28)],
+      (error, sessions = []) => {
+        if (error) return res.status(500).json({ detail: '周报读取失败' });
+        const current = sessions.filter(row => row.date >= weekStart);
+        const previous = sessions.filter(row => row.date >= previousWeekStart && row.date < weekStart);
+        const complete = rows => rows.filter(row => row.completed);
+        const average = (rows, field) => rows.length
+          ? rows.reduce((sum, row) => sum + Number(row[field] || 0), 0) / rows.length
+          : 0;
+        db.all(
+          `SELECT protected_date, reason FROM streak_protections
+           WHERE user_id = ? AND child_id = ? AND protected_date >= ?`,
+          [req.userId, child.id, addDateDays(weekStart, -28)],
+          (protectionError, protections = []) => {
+            if (protectionError) return res.status(500).json({ detail: '中断保护读取失败' });
+            db.get(
+              `SELECT * FROM weekly_rewards
+               WHERE user_id = ? AND child_id = ? AND week_start = ?`,
+              [req.userId, child.id, weekStart],
+              (rewardError, reward) => {
+            if (rewardError) return res.status(500).json({ detail: '周奖励读取失败' });
+            const completed = complete(current);
+            res.json({
+              child_id: child.id,
+              week_start: weekStart,
+              goal: child.weekly_goal || 5,
+              reward_text: reward?.reward_text || child.reward_text,
+              reward_status: reward?.status || 'pending',
+              completed_days: completed.length,
+              goal_reached: completed.length >= (child.weekly_goal || 5),
+              streak_days: calculateStreak(sessions, protections),
+              protected_date: protections.find(item => item.protected_date >= weekStart)?.protected_date || null,
+              protection_available: !protections.some(item => item.protected_date >= weekStart),
+              avg_homework_minutes: average(completed, 'homework_minutes'),
+              avg_playtime_minutes: average(completed, 'playtime_minutes'),
+              previous_completed_days: complete(previous).length,
+              days: current.map(row => ({
+                date: row.date,
+                completed: Boolean(row.completed),
+                protected: protections.some(item => item.protected_date === row.date),
+                homework_minutes: row.homework_minutes || 0,
+                playtime_minutes: row.playtime_minutes || 0
+              })).concat(protections.filter(item => item.protected_date >= weekStart &&
+                !current.some(row => row.date === item.protected_date)).map(item => ({
+                date: item.protected_date, completed: false, protected: true,
+                homework_minutes: 0, playtime_minutes: 0
+              })))
+            });
+              }
+            );
+          }
+        );
+      }
+    );
+  });
+});
+
+app.post('/api/growth/protection', auth, parentAuth, (req, res) => {
+  const protectedDate = req.body.date;
+  const reason = typeof req.body.reason === 'string' ? req.body.reason.trim() : '';
+  const weekStart = currentWeekStart();
+  const weekEnd = addDateDays(weekStart, 6);
+  if (!validDate(protectedDate) || protectedDate < weekStart || protectedDate > weekEnd ||
+      protectedDate > beijingDateString()) {
+    return res.status(400).json({ detail: '只能保护本周的一天' });
+  }
+  if (!reason || reason.length > 80) return res.status(400).json({ detail: '保护原因需为1-80个字符' });
+  resolveOwnedChild(req.userId, req.body.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.get(
+      `SELECT completed FROM homework_sessions
+       WHERE user_id = ? AND child_id = ? AND date = ?`,
+      [req.userId, child.id, protectedDate],
+      (sessionError, session) => {
+        if (sessionError) return res.status(500).json({ detail: '中断保护检查失败' });
+        if (session?.completed) return res.status(400).json({ detail: '已完成日期不需要中断保护' });
+        db.run(
+          `INSERT INTO streak_protections (
+            user_id, child_id, protected_date, week_start, reason
+          ) VALUES (?, ?, ?, ?, ?)`,
+          [req.userId, child.id, protectedDate, weekStart, reason],
+          function onInsert(error) {
+            if (error?.code === 'SQLITE_CONSTRAINT') {
+              return res.status(400).json({ detail: '本周已经使用过一次中断保护' });
+            }
+            if (error) return res.status(500).json({ detail: '中断保护保存失败' });
+            audit(req.userId, 'growth.protection_added', 'child', child.id, { protectedDate, reason });
+            res.status(201).json({ id: this.lastID, protected_date: protectedDate, week_start: weekStart });
+          }
+        );
+      }
+    );
+  });
+});
+
+app.put('/api/rewards/current', auth, parentAuth, (req, res) => {
+  const status = req.body.status || 'pending';
+  const rewardText = typeof req.body.reward_text === 'string' ? req.body.reward_text.trim() : '';
+  if (!['pending', 'approved', 'redeemed'].includes(status)) {
+    return res.status(400).json({ detail: '奖励状态不正确' });
+  }
+  if (!rewardText || rewardText.length > 80) return res.status(400).json({ detail: '奖励内容需为1-80个字符' });
+  resolveOwnedChild(req.userId, req.body.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    const weekStart = currentWeekStart();
+    db.run(
+      `INSERT INTO weekly_rewards (user_id, child_id, week_start, reward_text, status)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(user_id, child_id, week_start) DO UPDATE SET
+         reward_text = excluded.reward_text, status = excluded.status,
+         updated_at = CURRENT_TIMESTAMP`,
+      [req.userId, child.id, weekStart, rewardText, status],
+      (error) => {
+        if (error) return res.status(500).json({ detail: '周奖励保存失败' });
+        audit(req.userId, 'reward.updated', 'child', child.id, { weekStart, status });
+        res.json({ saved: true, child_id: child.id, week_start: weekStart, reward_text: rewardText, status });
+      }
+    );
+  });
+});
+
+// ==================== Plan Validation ====================
+
+app.get('/api/plan', auth, (req, res) => {
+  db.get('SELECT plan_tier, trial_started_at FROM users WHERE id = ?', [req.userId], (error, user) => {
+    if (error) return res.status(500).json({ detail: '套餐状态读取失败' });
+    const trialEndsAt = user?.trial_started_at
+      ? new Date(new Date(user.trial_started_at).getTime() + 14 * 86400000).toISOString()
+      : null;
+    res.json({
+      plan_tier: user?.plan_tier || 'free',
+      trial_started_at: user?.trial_started_at || null,
+      trial_ends_at: trialEndsAt,
+      family_features: ['多孩子档案', '提醒触达记录', '成长周报', '跨设备冲突处理', '数据备份']
+    });
+  });
+});
+
+app.post('/api/plan/trial', auth, parentAuth, (req, res) => {
+  db.run(
+    `UPDATE users SET plan_tier = 'family_trial',
+       trial_started_at = COALESCE(trial_started_at, CURRENT_TIMESTAMP)
+     WHERE id = ? AND plan_tier = 'free'`,
+    [req.userId],
+    function onUpdate(error) {
+      if (error) return res.status(500).json({ detail: '试用开启失败' });
+      audit(req.userId, 'plan.trial_started', 'user', req.userId);
+      res.json({ started: this.changes > 0, plan_tier: this.changes > 0 ? 'family_trial' : undefined });
+    }
+  );
+});
+
+app.post('/api/product-events', auth, parentAuth, (req, res) => {
+  const eventType = req.body.event_type;
+  const pricePoint = Number(req.body.price_point);
+  if (!['pricing_viewed', 'purchase_intent', 'trial_feedback'].includes(eventType)) {
+    return res.status(400).json({ detail: '产品事件不正确' });
+  }
+  if (req.body.price_point !== undefined && (!Number.isInteger(pricePoint) || pricePoint < 0 || pricePoint > 99900)) {
+    return res.status(400).json({ detail: '价格点不正确' });
+  }
+  if (!shortText(req.body.feedback, 300)) return res.status(400).json({ detail: '反馈内容过长' });
+  db.run(
+    `INSERT INTO product_events (user_id, event_type, plan_code, price_point, metadata)
+     VALUES (?, ?, 'family', ?, ?)`,
+    [req.userId, eventType, req.body.price_point === undefined ? null : pricePoint,
+      JSON.stringify({ feedback: req.body.feedback || '' })],
+    function onInsert(error) {
+      if (error) return res.status(500).json({ detail: '意向记录失败' });
+      res.status(201).json({ id: this.lastID, recorded: true });
+    }
+  );
+});
+
+app.get('/api/product-metrics', auth, parentAuth, (req, res) => {
+  db.get('SELECT created_at FROM users WHERE id = ?', [req.userId], (userError, user) => {
+    if (userError) return res.status(500).json({ detail: '验证指标读取失败' });
+    db.get(
+      `SELECT COUNT(*) AS child_count FROM child_profiles
+       WHERE user_id = ? AND archived_at IS NULL`,
+      [req.userId],
+      (childError, children) => {
+        if (childError) return res.status(500).json({ detail: '验证指标读取失败' });
+        db.get(
+          `SELECT COUNT(*) AS total_sessions, COUNT(DISTINCT date) AS active_days,
+             MIN(date) AS first_session_date, MAX(date) AS latest_session_date,
+             SUM(CASE WHEN date >= ? THEN 1 ELSE 0 END) AS sessions_last_7_days
+           FROM homework_sessions WHERE user_id = ?`,
+          [addDateDays(beijingDateString(), -6), req.userId],
+          (sessionError, sessions) => {
+            if (sessionError) return res.status(500).json({ detail: '验证指标读取失败' });
+            db.all(
+              `SELECT event_type, COUNT(*) AS count, MAX(created_at) AS latest
+               FROM product_events WHERE user_id = ? GROUP BY event_type`,
+              [req.userId],
+              (eventError, rows) => {
+                if (eventError) return res.status(500).json({ detail: '验证指标读取失败' });
+                const activitySpan = sessions.first_session_date && sessions.latest_session_date
+                  ? Math.round((new Date(`${sessions.latest_session_date}T12:00:00+08:00`) -
+                    new Date(`${sessions.first_session_date}T12:00:00+08:00`)) / 86400000)
+                  : 0;
+                res.json({
+                  events: rows || [],
+                  funnel: {
+                    activated: sessions.total_sessions > 0,
+                    active_days: sessions.active_days || 0,
+                    retained_7d: sessions.active_days >= 2 && activitySpan >= 6,
+                    sessions_last_7_days: sessions.sessions_last_7_days || 0,
+                    child_count: children.child_count || 0,
+                    account_created_at: user?.created_at || null,
+                    purchase_intent: (rows || []).some(row => row.event_type === 'purchase_intent')
+                  }
+                });
+              }
+            );
+          }
+        );
+      }
+    );
+  });
 });
 
 app.post('/api/sessions', auth, (req, res) => {
@@ -1132,7 +1705,15 @@ app.put('/api/sessions/:id', auth, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ detail: '记录编号不正确' });
 
-  const updates = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const requestBody = req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+  const clientVersion = requestBody.client_version;
+  const deviceId = typeof requestBody.device_id === 'string' ? requestBody.device_id.slice(0, 80) : null;
+  const updates = Object.fromEntries(
+    Object.entries(requestBody).filter(([key]) => !['client_version', 'device_id'].includes(key))
+  );
+  if (clientVersion !== undefined && (!Number.isInteger(clientVersion) || clientVersion < 1)) {
+    return res.status(400).json({ detail: '记录版本号不正确' });
+  }
   const validationError = validateSessionUpdates(updates);
   if (validationError) return res.status(400).json({ detail: validationError });
 
@@ -1146,17 +1727,47 @@ app.put('/api/sessions/:id', auth, (req, res) => {
       const keys = Object.keys(updates);
       if (keys.length === 0) return res.json(session);
 
+      const saveConflict = (conflictSession = session) => db.run(
+        `INSERT INTO sync_conflicts (
+          user_id, child_id, session_id, device_id, base_version, server_version, client_payload
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [req.userId, conflictSession.child_id, conflictSession.id, deviceId, clientVersion,
+          conflictSession.version || 1,
+          JSON.stringify(updates)],
+        function onConflict(conflictError) {
+          if (conflictError) return res.status(500).json({ detail: '同步冲突记录失败' });
+          res.status(409).json({
+            detail: '其他设备已更新这条记录，请由家长选择保留版本',
+            conflict_id: this.lastID,
+            server_session: conflictSession
+          });
+        }
+      );
+      if (clientVersion !== undefined && clientVersion !== (session.version || 1)) return saveConflict();
+
       const saveUpdates = () => {
         const assignments = keys.map((key) => `${key} = ?`);
         const values = keys.map((key) => updates[key]);
-        assignments.push('updated_at = CURRENT_TIMESTAMP');
+        assignments.push('version = version + 1', 'updated_at = CURRENT_TIMESTAMP');
         values.push(id, req.userId);
+        if (clientVersion !== undefined) values.push(clientVersion);
 
         db.run(
-          `UPDATE homework_sessions SET ${assignments.join(', ')} WHERE id = ? AND user_id = ?`,
+          `UPDATE homework_sessions SET ${assignments.join(', ')}
+           WHERE id = ? AND user_id = ?${clientVersion !== undefined ? ' AND version = ?' : ''}`,
           values,
-          (updateError) => {
+          function onSessionUpdate(updateError) {
             if (updateError) return res.status(500).json({ detail: '更新失败' });
+            if (this.changes === 0 && clientVersion !== undefined) {
+              return db.get(
+                'SELECT * FROM homework_sessions WHERE id = ? AND user_id = ?',
+                [id, req.userId],
+                (latestError, latest) => {
+                  if (latestError || !latest) return res.status(500).json({ detail: '同步冲突读取失败' });
+                  saveConflict(latest);
+                }
+              );
+            }
             db.get('SELECT * FROM homework_sessions WHERE id = ?', [id], (readError, updated) => {
               if (readError) return res.status(500).json({ detail: '记录读取失败' });
               res.json(updated);
@@ -1182,6 +1793,76 @@ app.put('/api/sessions/:id', auth, (req, res) => {
         if (!valid) return res.status(403).json({ detail: '完成作业需要家长确认' });
         saveUpdates();
       });
+    }
+  );
+});
+
+app.get('/api/sync/conflicts', auth, parentAuth, (req, res) => {
+  db.all(
+    `SELECT conflicts.*, sessions.date, children.name AS child_name
+     FROM sync_conflicts conflicts
+     JOIN homework_sessions sessions ON sessions.id = conflicts.session_id
+     JOIN child_profiles children ON children.id = conflicts.child_id
+     WHERE conflicts.user_id = ? AND conflicts.status = 'pending'
+     ORDER BY conflicts.id DESC LIMIT 50`,
+    [req.userId],
+    (error, rows) => {
+      if (error) return res.status(500).json({ detail: '同步冲突读取失败' });
+      res.json((rows || []).map(row => ({
+        ...row,
+        client_payload: JSON.parse(row.client_payload)
+      })));
+    }
+  );
+});
+
+app.post('/api/sync/conflicts/:id/resolve', auth, parentAuth, (req, res) => {
+  const conflictId = parsePositiveId(req.params.id);
+  const resolution = req.body.resolution;
+  if (!conflictId || !['server', 'client'].includes(resolution)) {
+    return res.status(400).json({ detail: '冲突处理选项不正确' });
+  }
+  db.get(
+    `SELECT * FROM sync_conflicts
+     WHERE id = ? AND user_id = ? AND status = 'pending'`,
+    [conflictId, req.userId],
+    (error, conflict) => {
+      if (error) return res.status(500).json({ detail: '同步冲突读取失败' });
+      if (!conflict) return res.status(404).json({ detail: '同步冲突不存在或已处理' });
+      const finish = () => db.run(
+        `UPDATE sync_conflicts SET status = ?, resolved_at = CURRENT_TIMESTAMP
+         WHERE id = ? AND user_id = ? AND status = 'pending'`,
+        [`resolved_${resolution}`, conflictId, req.userId],
+        function onResolve(resolveError) {
+          if (resolveError) return res.status(500).json({ detail: '同步冲突处理失败' });
+          audit(req.userId, 'sync.conflict_resolved', 'sync_conflict', conflictId, { resolution });
+          res.json({ resolved: this.changes === 1, resolution });
+        }
+      );
+      if (resolution === 'server') return finish();
+
+      let updates;
+      try {
+        updates = JSON.parse(conflict.client_payload);
+      } catch {
+        return res.status(500).json({ detail: '冲突数据损坏' });
+      }
+      const validationError = validateSessionUpdates(updates);
+      if (validationError) return res.status(400).json({ detail: validationError });
+      const keys = Object.keys(updates);
+      if (keys.length === 0) return finish();
+      const assignments = keys.map(key => `${key} = ?`);
+      const values = keys.map(key => updates[key]);
+      assignments.push('version = version + 1', 'updated_at = CURRENT_TIMESTAMP');
+      values.push(conflict.session_id, req.userId);
+      db.run(
+        `UPDATE homework_sessions SET ${assignments.join(', ')} WHERE id = ? AND user_id = ?`,
+        values,
+        (updateError) => {
+          if (updateError) return res.status(500).json({ detail: '客户端版本恢复失败' });
+          finish();
+        }
+      );
     }
   );
 });
@@ -1266,8 +1947,59 @@ app.get('/api/stats', auth, parentAuth, (req, res) => {
   });
 });
 
+app.get('/api/audit-logs', auth, parentAuth, (req, res) => {
+  db.all(
+    `SELECT id, action, entity_type, entity_id, metadata, created_at
+     FROM audit_logs WHERE user_id = ? ORDER BY id DESC LIMIT 50`,
+    [req.userId],
+    (error, rows) => {
+      if (error) return res.status(500).json({ detail: '审计日志读取失败' });
+      res.json((rows || []).map(row => ({
+        ...row,
+        metadata: row.metadata ? JSON.parse(row.metadata) : null
+      })));
+    }
+  );
+});
+
+app.get('/api/operations/status', auth, parentAuth, (req, res) => {
+  const backupDir = path.join(path.dirname(dbPath), 'backups');
+  const backups = fs.existsSync(backupDir)
+    ? fs.readdirSync(backupDir).filter(name => name.endsWith('.db')).sort().reverse().slice(0, 5)
+    : [];
+  db.get('PRAGMA user_version', (versionError, version) => {
+    if (versionError) return res.status(500).json({ detail: '运行状态读取失败' });
+    db.get('PRAGMA integrity_check', (integrityError, integrity) => {
+      if (integrityError) return res.status(500).json({ detail: '数据库完整性检查失败' });
+      db.get(
+        `SELECT COUNT(*) AS count FROM sync_conflicts
+         WHERE user_id = ? AND status = 'pending'`,
+        [req.userId],
+        (conflictError, conflicts) => {
+          if (conflictError) return res.status(500).json({ detail: '运行状态读取失败' });
+          res.json({
+            service: 'tonight-play-time',
+            schema_version: version.user_version,
+            database_integrity: Object.values(integrity || {})[0] || 'unknown',
+            pending_conflicts: conflicts?.count || 0,
+            backup_count: backups.length,
+            latest_backup: backups[0] || null,
+            uptime_seconds: Math.floor(process.uptime())
+          });
+        }
+      );
+    });
+  });
+});
+
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', service: 'tonight-play-time' });
+  db.get('SELECT 1 AS ok', (error) => {
+    res.status(error ? 503 : 200).json({
+      status: error ? 'degraded' : 'ok',
+      service: 'tonight-play-time',
+      database: error ? 'unavailable' : 'ok'
+    });
+  });
 });
 
 // Explicit public allowlist: source, deployment files, and databases are never

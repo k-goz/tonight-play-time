@@ -9,6 +9,8 @@ const API_SERVICE = {
   user: null,
   parentToken: null,
   parentExpiresAt: 0,
+  deviceId: null,
+  offlineQueue: [],
 
   /**
    * Initialize API service
@@ -20,6 +22,14 @@ const API_SERVICE = {
     this.parentToken = sessionStorage.getItem('parent_access_token');
     this.parentExpiresAt = Number(sessionStorage.getItem('parent_access_expires_at')) || 0;
     if (!this.hasParentAccess()) this.clearParentAccess();
+    this.deviceId = localStorage.getItem('family_device_id') ||
+      (crypto.randomUUID ? crypto.randomUUID() : `device-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    localStorage.setItem('family_device_id', this.deviceId);
+    try {
+      this.offlineQueue = JSON.parse(localStorage.getItem('session_sync_queue') || '[]');
+    } catch {
+      this.offlineQueue = [];
+    }
     
     // Use relative URL (same origin) - works for both local and cloud deployment
     this.BASE_URL = '';
@@ -60,13 +70,16 @@ const API_SERVICE = {
       if (response.status === 403 && requiresParent) this.clearParentAccess();
 
       if (!response.ok) {
-        const error = await response.json().catch(() => ({}));
-        throw new Error(error.detail || '请求失败');
+        const data = await response.json().catch(() => ({}));
+        const requestError = new Error(data.detail || '请求失败');
+        requestError.status = response.status;
+        requestError.data = data;
+        throw requestError;
       }
 
       return await response.json();
     } catch (error) {
-      console.error('API request failed:', error);
+      if (!error.status && navigator.onLine) console.error('API request failed:', error);
       throw error;
     }
   },
@@ -154,6 +167,54 @@ const API_SERVICE = {
     this.parentExpiresAt = 0;
     sessionStorage.removeItem('parent_access_token');
     sessionStorage.removeItem('parent_access_expires_at');
+  },
+
+  saveOfflineQueue() {
+    localStorage.setItem('session_sync_queue', JSON.stringify(this.offlineQueue.slice(-100)));
+    window.dispatchEvent(new CustomEvent('sync-status', {
+      detail: { pending: this.offlineQueue.length, online: navigator.onLine }
+    }));
+  },
+
+  enqueueSessionUpdate(sessionId, data) {
+    const existingIndex = this.offlineQueue.findIndex(item => item.sessionId === sessionId);
+    const queued = {
+      sessionId,
+      data: existingIndex >= 0
+        ? { ...this.offlineQueue[existingIndex].data, ...data }
+        : data,
+      queuedAt: new Date().toISOString()
+    };
+    if (existingIndex >= 0) this.offlineQueue.splice(existingIndex, 1, queued);
+    else this.offlineQueue.push(queued);
+    this.saveOfflineQueue();
+    return queued;
+  },
+
+  async flushOfflineQueue() {
+    if (!this.isLoggedIn() || !navigator.onLine || this.offlineQueue.length === 0) return;
+    let flushed = 0;
+    while (this.offlineQueue.length > 0) {
+      const item = this.offlineQueue[0];
+      try {
+        await this.request(`/api/sessions/${item.sessionId}`, {
+          method: 'PUT',
+          body: JSON.stringify(item.data)
+        });
+        this.offlineQueue.shift();
+        flushed += 1;
+        this.saveOfflineQueue();
+      } catch (error) {
+        if (error.status === 409 || error.status === 404) {
+          this.offlineQueue.shift();
+          this.saveOfflineQueue();
+          window.dispatchEvent(new CustomEvent('sync-conflict', { detail: error.data || {} }));
+          continue;
+        }
+        break;
+      }
+    }
+    if (flushed > 0) window.dispatchEvent(new CustomEvent('sync-flushed', { detail: { flushed } }));
   },
 
   /**
@@ -298,13 +359,29 @@ const API_SERVICE = {
   /**
    * Update session
    */
-  async updateSession(sessionId, data, { approvalToken = null, requiresParent = false } = {}) {
-    return await this.request(`/api/sessions/${sessionId}`, {
-      method: 'PUT',
-      approvalToken,
-      requiresParent,
-      body: JSON.stringify(data)
-    });
+  async updateSession(sessionId, data, {
+    approvalToken = null, requiresParent = false, clientVersion = null
+  } = {}) {
+    const payload = {
+      ...data,
+      ...(clientVersion ? { client_version: clientVersion } : {}),
+      device_id: this.deviceId
+    };
+    try {
+      return await this.request(`/api/sessions/${sessionId}`, {
+        method: 'PUT',
+        approvalToken,
+        requiresParent,
+        body: JSON.stringify(payload)
+      });
+    } catch (error) {
+      const offline = !navigator.onLine || (error instanceof TypeError && !error.status);
+      if (offline && !approvalToken && !requiresParent) {
+        this.enqueueSessionUpdate(sessionId, payload);
+        return { queued: true, version: clientVersion };
+      }
+      throw error;
+    }
   },
 
   /**
@@ -334,6 +411,86 @@ const API_SERVICE = {
     return await this.request(`/api/stats?child_id=${childId}&days=${days}`, {
       requiresParent: true
     });
+  },
+
+  async getFamilyPreferences() {
+    return await this.request('/api/family/preferences');
+  },
+
+  async updateFamilyPreferences(preferences) {
+    return await this.request('/api/family/preferences', {
+      method: 'PUT', requiresParent: true, body: JSON.stringify(preferences)
+    });
+  },
+
+  async updateChildCapabilities(childId, settings) {
+    return await this.updateChild(childId, settings);
+  },
+
+  async recordReminderEvent(childId, eventType, status, detail = '') {
+    return await this.request('/api/reminders/events', {
+      method: 'POST',
+      body: JSON.stringify({ child_id: childId, event_type: eventType, status, detail })
+    });
+  },
+
+  async getReminderEvents(childId) {
+    return await this.request(`/api/reminders/events?child_id=${childId}`, { requiresParent: true });
+  },
+
+  async getWeeklyInsights(childId) {
+    return await this.request(`/api/insights/weekly?child_id=${childId}`, { requiresParent: true });
+  },
+
+  async saveWeeklyReward(childId, rewardText, status) {
+    return await this.request('/api/rewards/current', {
+      method: 'PUT', requiresParent: true,
+      body: JSON.stringify({ child_id: childId, reward_text: rewardText, status })
+    });
+  },
+
+  async addStreakProtection(childId, date, reason) {
+    return await this.request('/api/growth/protection', {
+      method: 'POST', requiresParent: true,
+      body: JSON.stringify({ child_id: childId, date, reason })
+    });
+  },
+
+  async getSyncConflicts() {
+    return await this.request('/api/sync/conflicts', { requiresParent: true });
+  },
+
+  async resolveSyncConflict(conflictId, resolution) {
+    return await this.request(`/api/sync/conflicts/${conflictId}/resolve`, {
+      method: 'POST', requiresParent: true, body: JSON.stringify({ resolution })
+    });
+  },
+
+  async getPlan() {
+    return await this.request('/api/plan');
+  },
+
+  async startFamilyTrial() {
+    return await this.request('/api/plan/trial', { method: 'POST', requiresParent: true });
+  },
+
+  async recordProductEvent(eventType, pricePoint, feedback = '') {
+    return await this.request('/api/product-events', {
+      method: 'POST', requiresParent: true,
+      body: JSON.stringify({ event_type: eventType, price_point: pricePoint, feedback })
+    });
+  },
+
+  async getProductMetrics() {
+    return await this.request('/api/product-metrics', { requiresParent: true });
+  },
+
+  async getOperationsStatus() {
+    return await this.request('/api/operations/status', { requiresParent: true });
+  },
+
+  async getAuditLogs() {
+    return await this.request('/api/audit-logs', { requiresParent: true });
   },
 
   /**
