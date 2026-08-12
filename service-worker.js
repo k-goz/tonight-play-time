@@ -3,14 +3,14 @@
  * 提供离线缓存支持
  */
 
-const CACHE_NAME = 'homework-timer-v6';
+const CACHE_NAME = 'homework-timer-v7';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
-  './style.css?v=6',
-  './time-utils.js?v=6',
-  './app.js?v=6',
-  './api-service.js?v=6',
+  './style.css?v=7',
+  './time-utils.js?v=7',
+  './app.js?v=7',
+  './api-service.js?v=7',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png'

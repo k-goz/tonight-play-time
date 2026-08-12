@@ -70,7 +70,7 @@ const API_SERVICE = {
     });
 
     this.token = data.access_token;
-    this.user = { user_id: data.user_id, nickname: data.nickname };
+    this.user = { user_id: data.user_id, child_id: data.child_id, nickname: data.nickname };
     
     localStorage.setItem('api_token', this.token);
     localStorage.setItem('api_user', JSON.stringify(this.user));
@@ -147,19 +147,46 @@ const API_SERVICE = {
   },
 
   /**
+   * List child profiles owned by the signed-in family account.
+   */
+  async getChildren() {
+    return await this.request('/api/children');
+  },
+
+  /**
+   * Add a child profile to the family account.
+   */
+  async createChild(child) {
+    return await this.request('/api/children', {
+      method: 'POST',
+      body: JSON.stringify(child)
+    });
+  },
+
+  /**
+   * Update a child profile owned by the family account.
+   */
+  async updateChild(childId, updates) {
+    return await this.request(`/api/children/${childId}`, {
+      method: 'PUT',
+      body: JSON.stringify(updates)
+    });
+  },
+
+  /**
    * Get account-level parent settings. The PIN is never returned.
    */
-  async getSettings() {
-    return await this.request('/api/settings');
+  async getSettings(childId) {
+    return await this.request(`/api/settings?child_id=${childId}`);
   },
 
   /**
    * Save bedtime and optionally replace the parent PIN.
    */
-  async updateSettings(settings) {
+  async updateSettings(childId, settings) {
     return await this.request('/api/settings', {
       method: 'PUT',
-      body: JSON.stringify(settings)
+      body: JSON.stringify({ ...settings, child_id: childId })
     });
   },
 
@@ -176,27 +203,27 @@ const API_SERVICE = {
   /**
    * Create homework session
    */
-  async createSession(date, bedtime = '21:30') {
+  async createSession(childId, date, bedtime = '21:30') {
     return await this.request('/api/sessions', {
       method: 'POST',
-      body: JSON.stringify({ date, bedtime })
+      body: JSON.stringify({ child_id: childId, date, bedtime })
     });
   },
 
   /**
    * Get sessions
    */
-  async getSessions(limit = 30) {
-    return await this.request(`/api/sessions?limit=${limit}`);
+  async getSessions(childId, limit = 30) {
+    return await this.request(`/api/sessions?child_id=${childId}&limit=${limit}`);
   },
 
   /**
    * Import completed records created in local-only mode.
    */
-  async importSessions(records) {
+  async importSessions(childId, records) {
     return await this.request('/api/sessions/import', {
       method: 'POST',
-      body: JSON.stringify({ records })
+      body: JSON.stringify({ child_id: childId, records })
     });
   },
 
@@ -222,8 +249,8 @@ const API_SERVICE = {
   /**
    * Delete every session owned by the current account.
    */
-  async deleteAllSessions() {
-    return await this.request('/api/sessions', {
+  async deleteAllSessions(childId) {
+    return await this.request(`/api/sessions?child_id=${childId}`, {
       method: 'DELETE'
     });
   },
@@ -231,8 +258,8 @@ const API_SERVICE = {
   /**
    * Get statistics
    */
-  async getStats(days = 30) {
-    return await this.request(`/api/stats?days=${days}`);
+  async getStats(childId, days = 30) {
+    return await this.request(`/api/stats?child_id=${childId}&days=${days}`);
   },
 
   /**

@@ -88,6 +88,12 @@ body {
   gap: 0.5rem;
 }
 
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
 .app-title {
   font-size: 1.2rem;
   font-weight: 700;
@@ -912,6 +918,115 @@ body {
   font-size: 1rem;
 }
 
+/* ---------- 家庭成员 ---------- */
+.family-section {
+  padding: 1rem 1.25rem;
+}
+
+.family-section h3 {
+  font-size: 1.1rem;
+}
+
+.section-tip {
+  color: var(--color-text-light);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 1rem;
+}
+
+.family-profile-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.family-profile-card {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border: 2px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--color-card-bg);
+  box-shadow: var(--shadow-sm);
+  color: inherit;
+  font-family: var(--font-family);
+  text-align: left;
+  cursor: pointer;
+}
+
+.family-profile-card.active {
+  border-color: var(--color-primary-light);
+}
+
+.profile-avatar {
+  font-size: 1.6rem;
+}
+
+.profile-name {
+  font-weight: 700;
+}
+
+.profile-meta {
+  color: var(--color-text-light);
+  font-size: 0.78rem;
+}
+
+.add-child-card {
+  padding: 1rem;
+  background: rgba(255, 255, 255, 0.55);
+  border: 1px dashed rgba(124, 92, 252, 0.35);
+  border-radius: var(--radius-md);
+}
+
+.add-child-grid {
+  display: grid;
+  grid-template-columns: 2fr 0.8fr 1.2fr;
+  gap: 0.75rem;
+}
+
+.form-group.compact {
+  margin-bottom: 0.75rem;
+}
+
+.form-group.compact label {
+  display: block;
+  margin-bottom: 0.35rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.form-group.compact .setting-input {
+  width: 100%;
+}
+
+.settings-message {
+  min-height: 1.4rem;
+  margin-top: 0.5rem;
+  color: var(--color-text-light);
+  font-size: 0.85rem;
+}
+
+.child-switcher {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.85);
+  box-shadow: var(--shadow-sm);
+}
+
+.child-selector {
+  max-width: 110px;
+  border: 0;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-weight: 700;
+  outline: none;
+}
+
 /* ---------- 设置 ---------- */
 .settings-section {
   padding: 1.5rem 1.25rem;
@@ -1081,9 +1196,49 @@ body {
     margin: 0 auto;
   }
 
+  .family-section {
+    max-width: 700px;
+    margin: 0 auto;
+  }
+
   .settings-section {
     max-width: 700px;
     margin: 0 auto;
+  }
+}
+
+@media (max-width: 520px) {
+  .header {
+    gap: 0.5rem;
+  }
+
+  .app-title {
+    font-size: 1rem;
+  }
+
+  .header-right {
+    gap: 0.4rem;
+  }
+
+  .child-selector {
+    max-width: 72px;
+  }
+
+  .add-child-grid {
+    grid-template-columns: 1fr 0.7fr;
+  }
+
+  .add-child-grid .form-group:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .setting-item {
+    gap: 0.75rem;
+  }
+
+  .setting-input {
+    min-width: 0;
+    max-width: 200px;
   }
 }
 
@@ -1305,9 +1460,6 @@ body {
 
 /* 用户信息显示 */
 .user-info {
-  position: absolute;
-  top: 1rem;
-  right: 4rem;
   display: flex;
   align-items: center;
   gap: 0.5rem;

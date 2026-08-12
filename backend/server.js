@@ -38,68 +38,210 @@ function addColumn(table, column, definition) {
   });
 }
 
-db.serialize(() => {
-  db.run('PRAGMA foreign_keys = ON');
-  db.run(`CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    nickname TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    pin_code TEXT DEFAULT '1234',
-    parent_pin_hash TEXT,
-    bedtime TEXT,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-  )`);
+function migrateToFamilySchema(resolve, reject) {
+  const migrationSql = `
+    BEGIN IMMEDIATE;
 
-  addColumn('users', 'parent_pin_hash', 'TEXT');
-  addColumn('users', 'bedtime', 'TEXT');
+    CREATE TABLE IF NOT EXISTS child_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      avatar TEXT NOT NULL DEFAULT '🌙',
+      bedtime TEXT NOT NULL DEFAULT '21:30',
+      is_default BOOLEAN NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
 
-  db.run(`CREATE TABLE IF NOT EXISTS homework_sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    date TEXT NOT NULL,
-    homework_minutes REAL DEFAULT 0,
-    total_minutes REAL DEFAULT 0,
-    start_time TEXT,
-    end_time TEXT,
-    completed BOOLEAN DEFAULT 0,
-    homework_done BOOLEAN DEFAULT 0,
-    correction_done BOOLEAN DEFAULT 0,
-    attitude_good BOOLEAN DEFAULT 0,
-    playtime_type TEXT,
-    playtime_minutes REAL DEFAULT 0,
-    bedtime TEXT DEFAULT '21:30',
-    state TEXT DEFAULT 'idle',
-    homework_seconds REAL DEFAULT 0,
-    paused_seconds REAL DEFAULT 0,
-    remaining_seconds REAL DEFAULT 0,
-    reward_choice TEXT,
-    title TEXT,
-    call_it_a_day BOOLEAN DEFAULT 0,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
-    UNIQUE (user_id, date)
-  )`);
+    INSERT INTO child_profiles (user_id, name, bedtime, is_default)
+    SELECT users.id, users.nickname, COALESCE(users.bedtime, '21:30'), 1
+    FROM users
+    WHERE NOT EXISTS (
+      SELECT 1 FROM child_profiles WHERE child_profiles.user_id = users.id
+    );
 
-  // Forward-only compatibility for databases created by the original MVP.
-  addColumn('homework_sessions', 'state', "TEXT DEFAULT 'idle'");
-  addColumn('homework_sessions', 'homework_seconds', 'REAL DEFAULT 0');
-  addColumn('homework_sessions', 'paused_seconds', 'REAL DEFAULT 0');
-  addColumn('homework_sessions', 'remaining_seconds', 'REAL DEFAULT 0');
-  addColumn('homework_sessions', 'reward_choice', 'TEXT');
-  addColumn('homework_sessions', 'title', 'TEXT');
-  addColumn('homework_sessions', 'call_it_a_day', 'BOOLEAN DEFAULT 0');
-  db.run('CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_user_date ON homework_sessions(user_id, date)');
+    UPDATE child_profiles
+    SET is_default = 0
+    WHERE is_default = 1 AND id NOT IN (
+      SELECT MIN(id) FROM child_profiles WHERE is_default = 1 GROUP BY user_id
+    );
 
-  db.run(`CREATE TABLE IF NOT EXISTS auth_tokens (
-    token_hash TEXT PRIMARY KEY,
-    user_id INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-  )`);
-  db.run('CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id)');
+    UPDATE child_profiles
+    SET is_default = 1
+    WHERE id IN (
+      SELECT MIN(id) FROM child_profiles
+      GROUP BY user_id
+      HAVING MAX(is_default) = 0
+    );
+
+    DROP TABLE IF EXISTS homework_sessions_family;
+    CREATE TABLE homework_sessions_family (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      child_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      homework_minutes REAL DEFAULT 0,
+      total_minutes REAL DEFAULT 0,
+      start_time TEXT,
+      end_time TEXT,
+      completed BOOLEAN DEFAULT 0,
+      homework_done BOOLEAN DEFAULT 0,
+      correction_done BOOLEAN DEFAULT 0,
+      attitude_good BOOLEAN DEFAULT 0,
+      playtime_type TEXT,
+      playtime_minutes REAL DEFAULT 0,
+      bedtime TEXT DEFAULT '21:30',
+      state TEXT DEFAULT 'idle',
+      homework_seconds REAL DEFAULT 0,
+      paused_seconds REAL DEFAULT 0,
+      remaining_seconds REAL DEFAULT 0,
+      reward_choice TEXT,
+      title TEXT,
+      call_it_a_day BOOLEAN DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (child_id) REFERENCES child_profiles(id) ON DELETE CASCADE,
+      UNIQUE (user_id, child_id, date)
+    );
+
+    INSERT INTO homework_sessions_family (
+      id, user_id, child_id, date, homework_minutes, total_minutes,
+      start_time, end_time, completed, homework_done, correction_done,
+      attitude_good, playtime_type, playtime_minutes, bedtime, state,
+      homework_seconds, paused_seconds, remaining_seconds, reward_choice,
+      title, call_it_a_day, created_at, updated_at
+    )
+    SELECT
+      sessions.id, sessions.user_id, children.id, sessions.date,
+      sessions.homework_minutes, sessions.total_minutes, sessions.start_time,
+      sessions.end_time, sessions.completed, sessions.homework_done,
+      sessions.correction_done, sessions.attitude_good, sessions.playtime_type,
+      sessions.playtime_minutes, sessions.bedtime, sessions.state,
+      sessions.homework_seconds, sessions.paused_seconds,
+      sessions.remaining_seconds, sessions.reward_choice, sessions.title,
+      sessions.call_it_a_day, sessions.created_at, sessions.updated_at
+    FROM homework_sessions sessions
+    JOIN child_profiles children
+      ON children.user_id = sessions.user_id AND children.is_default = 1;
+
+    DROP TABLE homework_sessions;
+    ALTER TABLE homework_sessions_family RENAME TO homework_sessions;
+    CREATE INDEX IF NOT EXISTS idx_sessions_user_child
+      ON homework_sessions(user_id, child_id);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_child_profiles_one_default
+      ON child_profiles(user_id) WHERE is_default = 1;
+    CREATE INDEX IF NOT EXISTS idx_child_profiles_user
+      ON child_profiles(user_id);
+    PRAGMA user_version = 2;
+    COMMIT;
+  `;
+
+  db.exec(migrationSql, (error) => {
+    if (!error) return resolve();
+    db.run('ROLLBACK', () => reject(error));
+  });
+}
+
+const databaseReady = new Promise((resolve, reject) => {
+  db.serialize(() => {
+    db.run('PRAGMA foreign_keys = ON');
+    db.run(`CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      nickname TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      pin_code TEXT DEFAULT '1234',
+      parent_pin_hash TEXT,
+      bedtime TEXT,
+      settings_initialized BOOLEAN NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )`);
+
+    addColumn('users', 'parent_pin_hash', 'TEXT');
+    addColumn('users', 'bedtime', 'TEXT');
+    addColumn('users', 'settings_initialized', 'BOOLEAN NOT NULL DEFAULT 0');
+    db.run('UPDATE users SET settings_initialized = 1 WHERE bedtime IS NOT NULL');
+
+    db.run(`CREATE TABLE IF NOT EXISTS homework_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      homework_minutes REAL DEFAULT 0,
+      total_minutes REAL DEFAULT 0,
+      start_time TEXT,
+      end_time TEXT,
+      completed BOOLEAN DEFAULT 0,
+      homework_done BOOLEAN DEFAULT 0,
+      correction_done BOOLEAN DEFAULT 0,
+      attitude_good BOOLEAN DEFAULT 0,
+      playtime_type TEXT,
+      playtime_minutes REAL DEFAULT 0,
+      bedtime TEXT DEFAULT '21:30',
+      state TEXT DEFAULT 'idle',
+      homework_seconds REAL DEFAULT 0,
+      paused_seconds REAL DEFAULT 0,
+      remaining_seconds REAL DEFAULT 0,
+      reward_choice TEXT,
+      title TEXT,
+      call_it_a_day BOOLEAN DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      UNIQUE (user_id, date)
+    )`);
+
+    // Forward-only compatibility for databases created by the original MVP.
+    addColumn('homework_sessions', 'state', "TEXT DEFAULT 'idle'");
+    addColumn('homework_sessions', 'homework_seconds', 'REAL DEFAULT 0');
+    addColumn('homework_sessions', 'paused_seconds', 'REAL DEFAULT 0');
+    addColumn('homework_sessions', 'remaining_seconds', 'REAL DEFAULT 0');
+    addColumn('homework_sessions', 'reward_choice', 'TEXT');
+    addColumn('homework_sessions', 'title', 'TEXT');
+    addColumn('homework_sessions', 'call_it_a_day', 'BOOLEAN DEFAULT 0');
+
+    db.run(`CREATE TABLE IF NOT EXISTS auth_tokens (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      expires_at INTEGER NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`);
+    db.run('CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id)');
+
+    db.get('PRAGMA user_version', (error, row) => {
+      if (error) return reject(error);
+      if ((row?.user_version || 0) < 2) return migrateToFamilySchema(resolve, reject);
+
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS child_profiles (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          user_id INTEGER NOT NULL,
+          name TEXT NOT NULL,
+          avatar TEXT NOT NULL DEFAULT '🌙',
+          bedtime TEXT NOT NULL DEFAULT '21:30',
+          is_default BOOLEAN NOT NULL DEFAULT 0,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_child_profiles_one_default
+          ON child_profiles(user_id) WHERE is_default = 1;
+        CREATE INDEX IF NOT EXISTS idx_child_profiles_user
+          ON child_profiles(user_id);
+        CREATE INDEX IF NOT EXISTS idx_sessions_user_child
+          ON homework_sessions(user_id, child_id);
+      `, (schemaError) => schemaError ? reject(schemaError) : resolve());
+    });
+  });
+});
+
+app.use((req, res, next) => {
+  databaseReady.then(() => next()).catch((error) => {
+    console.error('Database initialization failed:', error);
+    res.status(503).json({ detail: '数据库初始化失败' });
+  });
 });
 
 function hashPassword(password) {
@@ -167,6 +309,10 @@ function validNickname(nickname) {
   return typeof nickname === 'string' && nickname.trim().length >= 1 && nickname.trim().length <= 30;
 }
 
+function validAvatar(avatar) {
+  return typeof avatar === 'string' && avatar.trim().length >= 1 && avatar.trim().length <= 8;
+}
+
 function validDate(date) {
   return typeof date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(date);
 }
@@ -182,6 +328,57 @@ function validPin(pin) {
 function shortText(value, maxLength = 100) {
   return value === null || value === undefined ||
     (typeof value === 'string' && value.length <= maxLength);
+}
+
+function parsePositiveId(value) {
+  const id = Number.parseInt(value, 10);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function resolveOwnedChild(userId, rawChildId, callback) {
+  if (rawChildId !== undefined && rawChildId !== null && rawChildId !== '') {
+    const childId = parsePositiveId(rawChildId);
+    if (!childId) return callback({ status: 400, detail: '孩子档案编号不正确' });
+    return db.get(
+      'SELECT * FROM child_profiles WHERE id = ? AND user_id = ?',
+      [childId, userId],
+      (error, child) => {
+        if (error) return callback({ status: 500, detail: '孩子档案读取失败' });
+        if (!child) return callback({ status: 404, detail: '孩子档案不存在' });
+        callback(null, child);
+      }
+    );
+  }
+
+  db.get(
+    'SELECT * FROM child_profiles WHERE user_id = ? ORDER BY is_default DESC, id ASC LIMIT 1',
+    [userId],
+    (error, child) => {
+      if (error) return callback({ status: 500, detail: '孩子档案读取失败' });
+      if (child) return callback(null, child);
+
+      db.get('SELECT nickname, bedtime FROM users WHERE id = ?', [userId], (userError, user) => {
+        if (userError) return callback({ status: 500, detail: '孩子档案读取失败' });
+        if (!user) return callback({ status: 404, detail: '用户不存在' });
+        db.run(
+          `INSERT INTO child_profiles (user_id, name, avatar, bedtime, is_default)
+           VALUES (?, ?, '🌙', ?, 1)`,
+          [userId, user.nickname, user.bedtime || '21:30'],
+          function onInsert(insertError) {
+            if (insertError) return callback({ status: 500, detail: '孩子档案创建失败' });
+            db.get('SELECT * FROM child_profiles WHERE id = ?', [this.lastID], (readError, created) => {
+              if (readError) return callback({ status: 500, detail: '孩子档案读取失败' });
+              callback(null, created);
+            });
+          }
+        );
+      });
+    }
+  );
+}
+
+function childErrorResponse(res, error) {
+  return res.status(error.status || 500).json({ detail: error.detail || '孩子档案读取失败' });
 }
 
 app.post('/api/auth/register', (req, res) => {
@@ -215,10 +412,22 @@ app.post('/api/auth/register', (req, res) => {
         }
 
         const userId = this.lastID;
-        createToken(userId, (tokenError, token) => {
-          if (tokenError) return res.status(500).json({ detail: '登录状态创建失败' });
-          res.status(201).json({ access_token: token, user_id: userId, nickname });
-        });
+        db.run(
+          `INSERT INTO child_profiles (user_id, name, avatar, bedtime, is_default)
+           VALUES (?, ?, '🌙', '21:30', 1)`,
+          [userId, nickname],
+          function onChildInsert(childError) {
+            if (childError) {
+              db.run('DELETE FROM users WHERE id = ?', [userId]);
+              return res.status(500).json({ detail: '孩子档案创建失败' });
+            }
+            const childId = this.lastID;
+            createToken(userId, (tokenError, token) => {
+              if (tokenError) return res.status(500).json({ detail: '登录状态创建失败' });
+              res.status(201).json({ access_token: token, user_id: userId, child_id: childId, nickname });
+            });
+          }
+        );
       }
     );
   });
@@ -263,24 +472,125 @@ app.get('/api/auth/me', auth, (req, res) => {
   });
 });
 
+// ==================== Child Profiles ====================
+
+app.get('/api/children', auth, (req, res) => {
+  db.all(
+    `SELECT id, name, avatar, bedtime, is_default, created_at, updated_at
+     FROM child_profiles WHERE user_id = ?
+     ORDER BY is_default DESC, id ASC`,
+    [req.userId],
+    (error, children) => {
+      if (error) return res.status(500).json({ detail: '孩子档案读取失败' });
+      res.json(children || []);
+    }
+  );
+});
+
+app.post('/api/children', auth, (req, res) => {
+  const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+  const avatar = typeof req.body.avatar === 'string' ? req.body.avatar.trim() : '🌟';
+  const bedtime = req.body.bedtime || '21:30';
+  if (!validNickname(name)) return res.status(400).json({ detail: '孩子昵称需为1-30个字符' });
+  if (!validAvatar(avatar)) return res.status(400).json({ detail: '头像格式不正确' });
+  if (!validBedtime(bedtime)) return res.status(400).json({ detail: '睡觉时间格式不正确' });
+
+  db.get('SELECT COUNT(*) AS count FROM child_profiles WHERE user_id = ?', [req.userId], (countError, row) => {
+    if (countError) return res.status(500).json({ detail: '孩子档案创建失败' });
+    if (row.count >= 6) return res.status(400).json({ detail: '每个家庭最多创建6个孩子档案' });
+
+    db.run(
+      `INSERT INTO child_profiles (user_id, name, avatar, bedtime, is_default)
+       VALUES (?, ?, ?, ?, 0)`,
+      [req.userId, name, avatar, bedtime],
+      function onInsert(error) {
+        if (error) return res.status(500).json({ detail: '孩子档案创建失败' });
+        db.get(
+          `SELECT id, name, avatar, bedtime, is_default, created_at, updated_at
+           FROM child_profiles WHERE id = ? AND user_id = ?`,
+          [this.lastID, req.userId],
+          (readError, child) => {
+            if (readError) return res.status(500).json({ detail: '孩子档案读取失败' });
+            res.status(201).json(child);
+          }
+        );
+      }
+    );
+  });
+});
+
+app.put('/api/children/:id', auth, (req, res) => {
+  const childId = parsePositiveId(req.params.id);
+  if (!childId) return res.status(400).json({ detail: '孩子档案编号不正确' });
+  const allowed = new Set(['name', 'avatar', 'bedtime']);
+  const keys = Object.keys(req.body || {});
+  if (keys.length === 0 || keys.some(key => !allowed.has(key))) {
+    return res.status(400).json({ detail: '孩子档案字段不正确' });
+  }
+
+  const values = [];
+  const assignments = [];
+  if (req.body.name !== undefined) {
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    if (!validNickname(name)) return res.status(400).json({ detail: '孩子昵称需为1-30个字符' });
+    assignments.push('name = ?');
+    values.push(name);
+  }
+  if (req.body.avatar !== undefined) {
+    const avatar = typeof req.body.avatar === 'string' ? req.body.avatar.trim() : '';
+    if (!validAvatar(avatar)) return res.status(400).json({ detail: '头像格式不正确' });
+    assignments.push('avatar = ?');
+    values.push(avatar);
+  }
+  if (req.body.bedtime !== undefined) {
+    if (!validBedtime(req.body.bedtime)) return res.status(400).json({ detail: '睡觉时间格式不正确' });
+    assignments.push('bedtime = ?');
+    values.push(req.body.bedtime);
+  }
+
+  assignments.push('updated_at = CURRENT_TIMESTAMP');
+  values.push(childId, req.userId);
+  db.run(
+    `UPDATE child_profiles SET ${assignments.join(', ')} WHERE id = ? AND user_id = ?`,
+    values,
+    function onUpdate(error) {
+      if (error) return res.status(500).json({ detail: '孩子档案保存失败' });
+      if (this.changes === 0) return res.status(404).json({ detail: '孩子档案不存在' });
+      db.get(
+        `SELECT id, name, avatar, bedtime, is_default, created_at, updated_at
+         FROM child_profiles WHERE id = ? AND user_id = ?`,
+        [childId, req.userId],
+        (readError, child) => {
+          if (readError) return res.status(500).json({ detail: '孩子档案读取失败' });
+          res.json(child);
+        }
+      );
+    }
+  );
+});
+
 // ==================== Parent Settings ====================
 
 app.get('/api/settings', auth, (req, res) => {
-  db.get(
-    'SELECT bedtime, parent_pin_hash, pin_code FROM users WHERE id = ?',
-    [req.userId],
-    (error, user) => {
-      if (error) return res.status(500).json({ detail: '设置读取失败' });
-      if (!user) return res.status(404).json({ detail: '用户不存在' });
-      res.json({
-        bedtime: user.bedtime || null,
-        initialized: Boolean(user.bedtime),
-        pin_configured: Boolean(
-          user.parent_pin_hash || (user.pin_code && user.pin_code !== '1234')
-        )
-      });
-    }
-  );
+  resolveOwnedChild(req.userId, req.query.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.get(
+      'SELECT bedtime, settings_initialized, parent_pin_hash, pin_code FROM users WHERE id = ?',
+      [req.userId],
+      (error, user) => {
+        if (error) return res.status(500).json({ detail: '设置读取失败' });
+        if (!user) return res.status(404).json({ detail: '用户不存在' });
+        res.json({
+          child_id: child.id,
+          bedtime: child.bedtime,
+          initialized: Boolean(user.settings_initialized || user.bedtime),
+          pin_configured: Boolean(
+            user.parent_pin_hash || (user.pin_code && user.pin_code !== '1234')
+          )
+        });
+      }
+    );
+  });
 });
 
 app.put('/api/settings', auth, (req, res) => {
@@ -291,7 +601,7 @@ app.put('/api/settings', auth, (req, res) => {
     if (!validBedtime(req.body.bedtime)) {
       return res.status(400).json({ detail: '睡觉时间格式不正确' });
     }
-    updates.push('bedtime = ?');
+    updates.push('bedtime = ?', 'settings_initialized = 1');
     values.push(req.body.bedtime);
   }
 
@@ -305,11 +615,25 @@ app.put('/api/settings', auth, (req, res) => {
 
   if (updates.length === 0) return res.status(400).json({ detail: '没有可保存的设置' });
 
-  values.push(req.userId);
-  db.run(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, values, function onUpdate(error) {
-    if (error) return res.status(500).json({ detail: '设置保存失败' });
-    if (this.changes === 0) return res.status(404).json({ detail: '用户不存在' });
-    res.json({ bedtime: req.body.bedtime || null, saved: true });
+  resolveOwnedChild(req.userId, req.body.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    values.push(req.userId);
+    db.run(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, values, function onUpdate(error) {
+      if (error) return res.status(500).json({ detail: '设置保存失败' });
+      if (this.changes === 0) return res.status(404).json({ detail: '用户不存在' });
+      if (req.body.bedtime === undefined) {
+        return res.json({ child_id: child.id, bedtime: child.bedtime, saved: true });
+      }
+
+      db.run(
+        'UPDATE child_profiles SET bedtime = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?',
+        [req.body.bedtime, child.id, req.userId],
+        (childUpdateError) => {
+          if (childUpdateError) return res.status(500).json({ detail: '孩子睡觉时间保存失败' });
+          res.json({ child_id: child.id, bedtime: req.body.bedtime, saved: true });
+        }
+      );
+    });
   });
 });
 
@@ -345,36 +669,44 @@ app.post('/api/sessions', auth, (req, res) => {
     return res.status(400).json({ detail: '日期或睡觉时间格式不正确' });
   }
 
-  db.run(
-    `INSERT INTO homework_sessions (user_id, date, bedtime, state)
-     VALUES (?, ?, ?, 'idle')
-     ON CONFLICT(user_id, date) DO UPDATE SET bedtime = excluded.bedtime, updated_at = CURRENT_TIMESTAMP`,
-    [req.userId, date, bedtime],
-    (error) => {
-      if (error) return res.status(500).json({ detail: '创建失败' });
-      db.get(
-        'SELECT * FROM homework_sessions WHERE user_id = ? AND date = ?',
-        [req.userId, date],
-        (readError, session) => {
-          if (readError) return res.status(500).json({ detail: '记录读取失败' });
-          res.status(201).json(session);
-        }
-      );
-    }
-  );
+  resolveOwnedChild(req.userId, req.body.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.run(
+      `INSERT INTO homework_sessions (user_id, child_id, date, bedtime, state)
+       VALUES (?, ?, ?, ?, 'idle')
+       ON CONFLICT(user_id, child_id, date) DO UPDATE SET
+         bedtime = excluded.bedtime, updated_at = CURRENT_TIMESTAMP`,
+      [req.userId, child.id, date, bedtime],
+      (error) => {
+        if (error) return res.status(500).json({ detail: '创建失败' });
+        db.get(
+          'SELECT * FROM homework_sessions WHERE user_id = ? AND child_id = ? AND date = ?',
+          [req.userId, child.id, date],
+          (readError, session) => {
+            if (readError) return res.status(500).json({ detail: '记录读取失败' });
+            res.status(201).json(session);
+          }
+        );
+      }
+    );
+  });
 });
 
 app.get('/api/sessions', auth, (req, res) => {
   const requestedLimit = Number.parseInt(req.query.limit, 10);
   const limit = Number.isFinite(requestedLimit) ? Math.min(Math.max(requestedLimit, 1), 100) : 30;
-  db.all(
-    'SELECT * FROM homework_sessions WHERE user_id = ? ORDER BY date DESC LIMIT ?',
-    [req.userId, limit],
-    (error, sessions) => {
-      if (error) return res.status(500).json({ detail: '记录读取失败' });
-      res.json(sessions || []);
-    }
-  );
+  resolveOwnedChild(req.userId, req.query.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.all(
+      `SELECT * FROM homework_sessions
+       WHERE user_id = ? AND child_id = ? ORDER BY date DESC LIMIT ?`,
+      [req.userId, child.id, limit],
+      (error, sessions) => {
+        if (error) return res.status(500).json({ detail: '记录读取失败' });
+        res.json(sessions || []);
+      }
+    );
+  });
 });
 
 function normalizeImportedRecord(record) {
@@ -414,72 +746,75 @@ app.post('/api/sessions/import', auth, (req, res) => {
     return res.status(400).json({ detail: '导入记录格式不正确' });
   }
 
-  let imported = 0;
-  let skipped = 0;
-  let index = 0;
+  resolveOwnedChild(req.userId, req.body.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    let imported = 0;
+    let skipped = 0;
+    let index = 0;
 
-  const finish = (error) => {
-    if (error) {
-      return db.run('ROLLBACK', () => res.status(500).json({ detail: '记录导入失败' }));
-    }
-    db.run('COMMIT', (commitError) => {
-      if (commitError) return res.status(500).json({ detail: '记录导入失败' });
-      res.json({ imported, skipped });
-    });
-  };
-
-  const importNext = () => {
-    if (index >= normalized.length) return finish();
-    const record = normalized[index++];
-    const homeworkMinutes = record.homeworkSeconds / 60;
-    const playtimeMinutes = record.remainingSeconds / 60;
-
-    db.run(
-      `INSERT INTO homework_sessions (
-        user_id, date, homework_minutes, start_time, end_time, completed,
-        homework_done, correction_done, attitude_good, playtime_type,
-        playtime_minutes, bedtime, state, homework_seconds, paused_seconds,
-        remaining_seconds, reward_choice, title, call_it_a_day
-      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(user_id, date) DO UPDATE SET
-        homework_minutes = excluded.homework_minutes,
-        start_time = excluded.start_time,
-        end_time = excluded.end_time,
-        completed = 1,
-        homework_done = excluded.homework_done,
-        correction_done = excluded.correction_done,
-        attitude_good = excluded.attitude_good,
-        playtime_type = excluded.playtime_type,
-        playtime_minutes = excluded.playtime_minutes,
-        bedtime = excluded.bedtime,
-        state = 'completed',
-        homework_seconds = excluded.homework_seconds,
-        paused_seconds = excluded.paused_seconds,
-        remaining_seconds = excluded.remaining_seconds,
-        reward_choice = excluded.reward_choice,
-        title = excluded.title,
-        call_it_a_day = excluded.call_it_a_day,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE homework_sessions.completed = 0`,
-      [
-        req.userId, record.date, homeworkMinutes, record.startTime, record.endTime,
-        record.homeworkDone, record.correctionDone, record.attitudeGood,
-        record.rewardChoice, playtimeMinutes, record.bedtime, record.homeworkSeconds,
-        record.pausedSeconds, record.remainingSeconds, record.rewardChoice,
-        record.title, record.callItADay
-      ],
-      function onImport(error) {
-        if (error) return finish(error);
-        if (this.changes > 0) imported += 1;
-        else skipped += 1;
-        importNext();
+    const finish = (error) => {
+      if (error) {
+        return db.run('ROLLBACK', () => res.status(500).json({ detail: '记录导入失败' }));
       }
-    );
-  };
+      db.run('COMMIT', (commitError) => {
+        if (commitError) return res.status(500).json({ detail: '记录导入失败' });
+        res.json({ imported, skipped });
+      });
+    };
 
-  db.run('BEGIN IMMEDIATE', (error) => {
-    if (error) return res.status(500).json({ detail: '记录导入失败' });
-    importNext();
+    const importNext = () => {
+      if (index >= normalized.length) return finish();
+      const record = normalized[index++];
+      const homeworkMinutes = record.homeworkSeconds / 60;
+      const playtimeMinutes = record.remainingSeconds / 60;
+
+      db.run(
+        `INSERT INTO homework_sessions (
+          user_id, child_id, date, homework_minutes, start_time, end_time, completed,
+          homework_done, correction_done, attitude_good, playtime_type,
+          playtime_minutes, bedtime, state, homework_seconds, paused_seconds,
+          remaining_seconds, reward_choice, title, call_it_a_day
+        ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, child_id, date) DO UPDATE SET
+          homework_minutes = excluded.homework_minutes,
+          start_time = excluded.start_time,
+          end_time = excluded.end_time,
+          completed = 1,
+          homework_done = excluded.homework_done,
+          correction_done = excluded.correction_done,
+          attitude_good = excluded.attitude_good,
+          playtime_type = excluded.playtime_type,
+          playtime_minutes = excluded.playtime_minutes,
+          bedtime = excluded.bedtime,
+          state = 'completed',
+          homework_seconds = excluded.homework_seconds,
+          paused_seconds = excluded.paused_seconds,
+          remaining_seconds = excluded.remaining_seconds,
+          reward_choice = excluded.reward_choice,
+          title = excluded.title,
+          call_it_a_day = excluded.call_it_a_day,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE homework_sessions.completed = 0`,
+        [
+          req.userId, child.id, record.date, homeworkMinutes, record.startTime, record.endTime,
+          record.homeworkDone, record.correctionDone, record.attitudeGood,
+          record.rewardChoice, playtimeMinutes, record.bedtime, record.homeworkSeconds,
+          record.pausedSeconds, record.remainingSeconds, record.rewardChoice,
+          record.title, record.callItADay
+        ],
+        function onImport(error) {
+          if (error) return finish(error);
+          if (this.changes > 0) imported += 1;
+          else skipped += 1;
+          importNext();
+        }
+      );
+    };
+
+    db.run('BEGIN IMMEDIATE', (error) => {
+      if (error) return res.status(500).json({ detail: '记录导入失败' });
+      importNext();
+    });
   });
 });
 
@@ -557,14 +892,17 @@ app.put('/api/sessions/:id', auth, (req, res) => {
 });
 
 app.delete('/api/sessions', auth, (req, res) => {
-  db.run(
-    'DELETE FROM homework_sessions WHERE user_id = ?',
-    [req.userId],
-    function onDelete(error) {
-      if (error) return res.status(500).json({ detail: '记录清空失败' });
-      res.json({ deleted: this.changes });
-    }
-  );
+  resolveOwnedChild(req.userId, req.query.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.run(
+      'DELETE FROM homework_sessions WHERE user_id = ? AND child_id = ?',
+      [req.userId, child.id],
+      function onDelete(error) {
+        if (error) return res.status(500).json({ detail: '记录清空失败' });
+        res.json({ child_id: child.id, deleted: this.changes });
+      }
+    );
+  });
 });
 
 app.delete('/api/sessions/:id', auth, (req, res) => {
@@ -587,29 +925,34 @@ app.get('/api/stats', auth, (req, res) => {
   const days = Number.isFinite(requestedDays) ? Math.min(Math.max(requestedDays, 1), 365) : 30;
   const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
-  db.all(
-    'SELECT * FROM homework_sessions WHERE user_id = ? AND date >= ?',
-    [req.userId, cutoffDate],
-    (error, sessions = []) => {
-      if (error) return res.status(500).json({ detail: '统计读取失败' });
-      const total = sessions.length;
-      const totalHomework = sessions.reduce((sum, session) => sum + (session.homework_minutes || 0), 0);
-      const totalPlaytime = sessions.reduce((sum, session) => sum + (session.playtime_minutes || 0), 0);
-      const completed = sessions.filter((session) => session.completed).length;
-      const stars = sessions.filter((session) =>
-        session.completed && session.homework_done && session.correction_done && session.attitude_good
-      ).length;
+  resolveOwnedChild(req.userId, req.query.child_id, (childError, child) => {
+    if (childError) return childErrorResponse(res, childError);
+    db.all(
+      `SELECT * FROM homework_sessions
+       WHERE user_id = ? AND child_id = ? AND date >= ?`,
+      [req.userId, child.id, cutoffDate],
+      (error, sessions = []) => {
+        if (error) return res.status(500).json({ detail: '统计读取失败' });
+        const total = sessions.length;
+        const totalHomework = sessions.reduce((sum, session) => sum + (session.homework_minutes || 0), 0);
+        const totalPlaytime = sessions.reduce((sum, session) => sum + (session.playtime_minutes || 0), 0);
+        const completed = sessions.filter((session) => session.completed).length;
+        const stars = sessions.filter((session) =>
+          session.completed && session.homework_done && session.correction_done && session.attitude_good
+        ).length;
 
-      res.json({
-        total_sessions: total,
-        total_homework_minutes: totalHomework,
-        avg_homework_minutes: total > 0 ? totalHomework / total : 0,
-        total_playtime_minutes: totalPlaytime,
-        completion_rate: total > 0 ? completed / total : 0,
-        star_days: stars
-      });
-    }
-  );
+        res.json({
+          child_id: child.id,
+          total_sessions: total,
+          total_homework_minutes: totalHomework,
+          avg_homework_minutes: total > 0 ? totalHomework / total : 0,
+          total_playtime_minutes: totalPlaytime,
+          completion_rate: total > 0 ? completed / total : 0,
+          star_days: stars
+        });
+      }
+    );
+  });
 });
 
 app.get('/api/health', (req, res) => {
@@ -671,4 +1014,4 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = { app, db, startServer };
+module.exports = { app, db, databaseReady, startServer };

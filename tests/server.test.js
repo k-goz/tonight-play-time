@@ -296,6 +296,87 @@ test('local record import is idempotent and never overwrites completed server da
   assert.deepEqual(isolatedSessions.body, []);
 });
 
+test('child profiles isolate same-day sessions and per-child bedtime', async () => {
+  const login = await api('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'test_child', password: 'test1234' })
+  });
+  const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${login.body.access_token}` };
+
+  const initialChildren = await api('/api/children', { headers });
+  assert.equal(initialChildren.response.status, 200);
+  assert.equal(initialChildren.body.length, 1);
+  const firstChild = initialChildren.body[0];
+  assert.equal(firstChild.name, '小月亮');
+  assert.equal(firstChild.is_default, 1);
+
+  const secondChildResponse = await api('/api/children', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name: '小太阳', avatar: '☀️', bedtime: '20:45' })
+  });
+  assert.equal(secondChildResponse.response.status, 201);
+  const secondChild = secondChildResponse.body;
+
+  const firstSameDay = await api('/api/sessions', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ child_id: firstChild.id, date: '2026-08-08', bedtime: '22:00' })
+  });
+  const secondSameDay = await api('/api/sessions', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ child_id: secondChild.id, date: '2026-08-08', bedtime: '20:45' })
+  });
+  assert.equal(firstSameDay.response.status, 201);
+  assert.equal(secondSameDay.response.status, 201);
+  assert.notEqual(firstSameDay.body.id, secondSameDay.body.id);
+
+  const firstSessions = await api(`/api/sessions?child_id=${firstChild.id}&limit=100`, { headers });
+  const secondSessions = await api(`/api/sessions?child_id=${secondChild.id}&limit=100`, { headers });
+  assert.equal(firstSessions.body.some(session => session.id === secondSameDay.body.id), false);
+  assert.deepEqual(secondSessions.body.map(session => session.date), ['2026-08-08']);
+
+  const updatedSettings = await api('/api/settings', {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ child_id: secondChild.id, bedtime: '20:30' })
+  });
+  assert.equal(updatedSettings.response.status, 200);
+  const secondSettings = await api(`/api/settings?child_id=${secondChild.id}`, { headers });
+  const firstSettings = await api(`/api/settings?child_id=${firstChild.id}`, { headers });
+  assert.equal(secondSettings.body.bedtime, '20:30');
+  assert.equal(firstSettings.body.bedtime, '22:00');
+
+  const otherLogin = await api('/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'other_child', password: 'test1234' })
+  });
+  const forbiddenChild = await api(`/api/sessions?child_id=${secondChild.id}`, {
+    headers: { Authorization: `Bearer ${otherLogin.body.access_token}` }
+  });
+  assert.equal(forbiddenChild.response.status, 404);
+  const forbiddenChildUpdate = await api(`/api/children/${secondChild.id}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${otherLogin.body.access_token}`
+    },
+    body: JSON.stringify({ name: '不应成功' })
+  });
+  assert.equal(forbiddenChildUpdate.response.status, 404);
+
+  const deletedSecond = await api(`/api/sessions?child_id=${secondChild.id}`, {
+    method: 'DELETE',
+    headers
+  });
+  assert.equal(deletedSecond.body.deleted, 1);
+  const firstAfterDelete = await api(`/api/sessions?child_id=${firstChild.id}&limit=100`, { headers });
+  assert.equal(firstAfterDelete.body.some(session => session.date === '2026-08-08'), true);
+});
+
 test('bulk record deletion is account-scoped and keeps the account', async () => {
   const firstLogin = await api('/api/auth/login', {
     method: 'POST',
@@ -316,9 +397,10 @@ test('bulk record deletion is account-scoped and keeps the account', async () =>
     body: JSON.stringify({ date: '2026-08-09', bedtime: '21:30' })
   });
 
+  const firstBeforeDelete = await api('/api/sessions?limit=100', { headers: firstHeaders });
   const deleted = await api('/api/sessions', { method: 'DELETE', headers: firstHeaders });
   assert.equal(deleted.response.status, 200);
-  assert.equal(deleted.body.deleted, 3);
+  assert.equal(deleted.body.deleted, firstBeforeDelete.body.length);
 
   const firstSessions = await api('/api/sessions?limit=100', { headers: firstHeaders });
   const secondSessions = await api('/api/sessions?limit=100', { headers: secondHeaders });

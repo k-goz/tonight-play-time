@@ -1,0 +1,97 @@
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const sqlite3 = require('sqlite3').verbose();
+
+function execSql(database, sql) {
+  return new Promise((resolve, reject) => {
+    database.exec(sql, (error) => error ? reject(error) : resolve());
+  });
+}
+
+test('legacy single-child database migrates records into a default child profile', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tonight-family-migration-'));
+  const databasePath = path.join(directory, 'legacy.db');
+  const database = new sqlite3.Database(databasePath);
+
+  await execSql(database, `
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      nickname TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      pin_code TEXT DEFAULT '1234',
+      bedtime TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE homework_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      homework_minutes REAL DEFAULT 0,
+      total_minutes REAL DEFAULT 0,
+      start_time TEXT,
+      end_time TEXT,
+      completed BOOLEAN DEFAULT 0,
+      homework_done BOOLEAN DEFAULT 0,
+      correction_done BOOLEAN DEFAULT 0,
+      attitude_good BOOLEAN DEFAULT 0,
+      playtime_type TEXT,
+      playtime_minutes REAL DEFAULT 0,
+      bedtime TEXT DEFAULT '21:30',
+      state TEXT DEFAULT 'idle',
+      homework_seconds REAL DEFAULT 0,
+      paused_seconds REAL DEFAULT 0,
+      remaining_seconds REAL DEFAULT 0,
+      reward_choice TEXT,
+      title TEXT,
+      call_it_a_day BOOLEAN DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE (user_id, date)
+    );
+    INSERT INTO users (id, username, nickname, password_hash, bedtime)
+      VALUES (1, 'legacy_family', '老大', 'legacy-hash', '22:10');
+    INSERT INTO homework_sessions (
+      id, user_id, date, completed, state, homework_seconds, bedtime, title
+    ) VALUES (7, 1, '2026-08-01', 1, 'completed', 900, '22:10', '历史记录');
+  `);
+  await new Promise((resolve, reject) => database.close(error => error ? reject(error) : resolve()));
+
+  const inspectionScript = `
+    const { db, databaseReady } = require('./backend/server');
+    databaseReady.then(() => {
+      db.get('SELECT * FROM child_profiles WHERE user_id = 1', (childError, child) => {
+        if (childError) throw childError;
+        db.get('SELECT * FROM homework_sessions WHERE id = 7', (sessionError, session) => {
+          if (sessionError) throw sessionError;
+          db.get('PRAGMA user_version', (versionError, version) => {
+            if (versionError) throw versionError;
+            process.stdout.write(JSON.stringify({ child, session, version: version.user_version }));
+            db.close();
+          });
+        });
+      });
+    }).catch(error => { console.error(error); process.exitCode = 1; });
+  `;
+  const result = spawnSync(process.execPath, ['-e', inspectionScript], {
+    cwd: path.resolve(__dirname, '..'),
+    env: { ...process.env, DATABASE_PATH: databasePath },
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const migrated = JSON.parse(result.stdout);
+  assert.equal(migrated.version, 2);
+  assert.equal(migrated.child.name, '老大');
+  assert.equal(migrated.child.bedtime, '22:10');
+  assert.equal(migrated.child.is_default, 1);
+  assert.equal(migrated.session.child_id, migrated.child.id);
+  assert.equal(migrated.session.homework_seconds, 900);
+  assert.equal(migrated.session.title, '历史记录');
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});

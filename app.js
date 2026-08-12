@@ -132,13 +132,17 @@ function escapeHtml(value) {
 
 const Storage = {
   accountUserId: null,
+  activeChildId: null,
 
-  useAccount(userId) {
+  useAccount(userId, childId = null) {
     this.accountUserId = userId ? String(userId) : null;
+    this.activeChildId = childId ? String(childId) : null;
   },
 
   scopedKey(key) {
-    return this.accountUserId ? `${key}_user_${this.accountUserId}` : key;
+    return this.accountUserId && this.activeChildId
+      ? `${key}_user_${this.accountUserId}_child_${this.activeChildId}`
+      : key;
   },
 
   has(key) {
@@ -240,7 +244,7 @@ const Storage = {
   },
 
   moveLocalTodayStateToAccount() {
-    if (!this.accountUserId || this.has(STORAGE_KEYS.TODAY_STATE)) return;
+    if (!this.accountUserId || !this.activeChildId || this.has(STORAGE_KEYS.TODAY_STATE)) return;
     const localState = this.getLocalTodayState();
     if (!localState) return;
     this.saveTodayState(localState);
@@ -255,6 +259,18 @@ const Storage = {
         : record
     );
     localStorage.setItem(STORAGE_KEYS.RECORDS, JSON.stringify(records));
+  },
+
+  migrateLegacyAccountScope(userId) {
+    if (!this.accountUserId || !this.activeChildId) return;
+    Object.values(STORAGE_KEYS).forEach(key => {
+      const oldKey = `${key}_user_${userId}`;
+      const newKey = this.scopedKey(key);
+      const oldValue = localStorage.getItem(oldKey);
+      if (oldValue !== null && localStorage.getItem(newKey) === null) {
+        localStorage.setItem(newKey, oldValue);
+      }
+    });
   }
 };
 
@@ -298,7 +314,7 @@ const App = {
 
   // ---------- 初始化 ----------
 
-  init() {
+  async init() {
     // Initialize API service
     this.apiReady = false;
     this.currentSessionId = null;
@@ -306,21 +322,31 @@ const App = {
     this.lastPersistedBucket = -1;
     this.pendingLocalRecords = [];
     this.pendingLocalSettings = null;
+    this.children = [];
+    this.activeChild = null;
+
+    this.bindEvents();
+    this.bindAuthEvents();
 
     // Check if user is logged in
     if (API_SERVICE.isLoggedIn()) {
       this.apiReady = true;
       this.user = API_SERVICE.user;
       console.log('User logged in:', this.user.nickname);
-      this.activateAccountStorage();
+      try {
+        await this.activateAccountStorage();
+      } catch (error) {
+        console.warn('Failed to load family profiles:', error);
+        this.apiReady = false;
+        API_SERVICE.logout();
+        Storage.useAccount(null);
+      }
     } else {
       Storage.useAccount(null);
     }
 
     this.settings = Storage.getSettings();
     this.updateBedtimeDisplay();
-    this.bindEvents();
-    this.bindAuthEvents();
     if (this.apiReady || localStorage.getItem('skip_auth') === 'true') {
       this.restoreTodayState();
     }
@@ -382,6 +408,10 @@ const App = {
 
     // 设置保存
     document.getElementById('btn-save-settings').addEventListener('click', () => this.saveSettings());
+    document.getElementById('child-selector').addEventListener('change', (event) => {
+      this.switchChild(Number(event.target.value));
+    });
+    document.getElementById('btn-add-child').addEventListener('click', () => this.addChildProfile());
     document.getElementById('btn-export').addEventListener('click', () => this.exportData());
     const btnClearData = document.getElementById('btn-clear-data');
     if (btnClearData) {
@@ -459,7 +489,7 @@ const App = {
       await API_SERVICE.login(username, password);
       this.user = API_SERVICE.user;
       this.apiReady = true;
-      this.activateAccountStorage();
+      await this.activateAccountStorage();
       this.loadStorageContext();
       this.enterApp();
     } catch (error) {
@@ -490,7 +520,7 @@ const App = {
       await API_SERVICE.register(username, nickname, password);
       this.user = API_SERVICE.user;
       this.apiReady = true;
-      this.activateAccountStorage();
+      await this.activateAccountStorage(API_SERVICE.user.child_id);
       this.loadStorageContext();
       this.enterApp();
     } catch (error) {
@@ -504,20 +534,34 @@ const App = {
     this.apiReady = false;
     this.user = null;
     Storage.useAccount(null);
+    this.children = [];
+    this.activeChild = null;
+    this.renderChildSwitcher();
     this.loadStorageContext();
     this.enterApp();
   },
 
-  activateAccountStorage() {
+  async activateAccountStorage(preferredChildId = null) {
     if (!this.user?.user_id) return;
     this.pendingLocalRecords = Storage.getLocalRecords().filter(record => !record.migratedToAccount);
     this.pendingLocalSettings = Storage.getLocalSettings();
-    Storage.useAccount(this.user.user_id);
+    this.children = await API_SERVICE.getChildren();
+    if (this.children.length === 0) throw new Error('账号缺少孩子档案');
+
+    const savedChildId = Number(localStorage.getItem(`active_child_user_${this.user.user_id}`));
+    this.activeChild = this.children.find(child => child.id === Number(preferredChildId)) ||
+      this.children.find(child => child.id === savedChildId) ||
+      this.children.find(child => child.is_default) ||
+      this.children[0];
+    Storage.useAccount(this.user.user_id, this.activeChild.id);
+    Storage.migrateLegacyAccountScope(this.user.user_id);
 
     if (!Storage.has(STORAGE_KEYS.SETTINGS)) {
-      Storage.saveSettings({ bedtime: this.pendingLocalSettings.bedtime });
+      Storage.saveSettings({ bedtime: this.activeChild.bedtime || this.pendingLocalSettings.bedtime });
     }
     Storage.moveLocalTodayStateToAccount();
+    localStorage.setItem(`active_child_user_${this.user.user_id}`, String(this.activeChild.id));
+    this.renderChildSwitcher();
   },
 
   loadStorageContext() {
@@ -529,6 +573,9 @@ const App = {
     this.pausedSeconds = 0;
     this.pauseStart = null;
     this.frozenRemainingSeconds = null;
+    this.currentSessionId = null;
+    this.sessionPromise = null;
+    this.lastPersistedBucket = -1;
     this.settings = Storage.getSettings();
     this.updateBedtimeDisplay();
     this.restoreTodayState();
@@ -542,13 +589,113 @@ const App = {
     document.getElementById('page-timer').classList.add('active');
     document.getElementById('page-timer').style.display = 'block';
 
-    if (this.user) {
-      this.addUserInfoToHeader();
-    }
-
     if (this.apiReady) {
       this.syncFromServer();
     }
+  },
+
+  renderChildSwitcher() {
+    const switcher = document.getElementById('child-switcher');
+    const selector = document.getElementById('child-selector');
+    const avatar = document.getElementById('active-child-avatar');
+    if (!this.apiReady || !this.activeChild) {
+      switcher.style.display = 'none';
+      selector.innerHTML = '';
+      return;
+    }
+
+    selector.innerHTML = this.children.map(child =>
+      `<option value="${child.id}"${child.id === this.activeChild.id ? ' selected' : ''}>${escapeHtml(child.name)}</option>`
+    ).join('');
+    avatar.textContent = this.activeChild.avatar || '🌙';
+    switcher.style.display = 'flex';
+  },
+
+  async switchChild(childId) {
+    if (!this.apiReady || childId === this.activeChild?.id) return;
+    if (![STATE.IDLE, STATE.COMPLETED].includes(this.state)) {
+      alert('当前孩子正在计时，请完成或重新开始后再切换。');
+      this.renderChildSwitcher();
+      return;
+    }
+
+    const child = this.children.find(item => item.id === childId);
+    if (!child) return;
+    this.activeChild = child;
+    Storage.useAccount(this.user.user_id, child.id);
+    localStorage.setItem(`active_child_user_${this.user.user_id}`, String(child.id));
+    if (!Storage.has(STORAGE_KEYS.SETTINGS)) {
+      Storage.saveSettings({ bedtime: child.bedtime });
+    }
+    this.renderChildSwitcher();
+    const statsOpen = document.getElementById('page-stats').classList.contains('active');
+    this.loadStorageContext();
+    await this.syncFromServer({ restoreToday: !statsOpen });
+
+    if (statsOpen) {
+      this.loadStatsData();
+      this.loadSettings();
+      this.renderFamilyProfiles();
+    }
+  },
+
+  async addChildProfile() {
+    if (!this.apiReady) return;
+    const nameInput = document.getElementById('new-child-name');
+    const avatarInput = document.getElementById('new-child-avatar');
+    const bedtimeInput = document.getElementById('new-child-bedtime');
+    const button = document.getElementById('btn-add-child');
+    const message = document.getElementById('child-profile-message');
+    const name = nameInput.value.trim();
+    if (!name) {
+      message.textContent = '请输入孩子昵称';
+      return;
+    }
+
+    button.disabled = true;
+    button.textContent = '正在添加…';
+    try {
+      const child = await API_SERVICE.createChild({
+        name,
+        avatar: avatarInput.value,
+        bedtime: bedtimeInput.value
+      });
+      this.children = await API_SERVICE.getChildren();
+      nameInput.value = '';
+      message.textContent = `已添加 ${child.name}`;
+      await this.switchChild(child.id);
+    } catch (error) {
+      message.textContent = error.message;
+    } finally {
+      button.disabled = false;
+      button.textContent = '＋ 添加孩子';
+      this.renderFamilyProfiles();
+    }
+  },
+
+  renderFamilyProfiles() {
+    const section = document.getElementById('family-section');
+    const list = document.getElementById('family-profile-list');
+    if (!this.apiReady) {
+      section.style.display = 'none';
+      list.innerHTML = '';
+      return;
+    }
+
+    section.style.display = '';
+    list.innerHTML = this.children.map(child => `
+      <button type="button" class="family-profile-card${child.id === this.activeChild?.id ? ' active' : ''}"
+        data-child-id="${child.id}" aria-pressed="${child.id === this.activeChild?.id}" aria-label="切换到${escapeHtml(child.name)}">
+        <span class="profile-avatar">${escapeHtml(child.avatar || '🌙')}</span>
+        <div>
+          <div class="profile-name">${escapeHtml(child.name)}${child.is_default ? ' · 首个档案' : ''}</div>
+          <div class="profile-meta">睡觉时间 ${escapeHtml(child.bedtime)}</div>
+        </div>
+      </button>
+    `).join('');
+    list.querySelectorAll('[data-child-id]').forEach(button => {
+      button.addEventListener('click', () => this.switchChild(Number(button.dataset.childId)));
+    });
   },
 
   addUserInfoToHeader() {
@@ -567,20 +714,24 @@ const App = {
     headerRight.insertBefore(userInfo, headerRight.firstChild);
   },
 
-  async syncFromServer() {
+  async syncFromServer({ restoreToday = true } = {}) {
     if (!this.apiReady) return;
 
     try {
       await this.syncSettingsFromServer();
       await this.migrateLocalRecordsToServer();
       const today = TimeUtils.getBeijingDateStr();
-      const sessions = await API_SERVICE.getSessions(100);
+      const sessions = await API_SERVICE.getSessions(this.activeChild.id, 100);
       const todaySession = sessions.find(s => s.date === today);
 
       this.mergeServerRecords(sessions);
 
       if (todaySession) {
         this.currentSessionId = todaySession.id;
+        if (!restoreToday) {
+          this.restoreFromServerSession(todaySession, { showSurfaces: false });
+          return;
+        }
         const localState = Storage.getTodayState();
         if (todaySession.completed) {
           this.restoreFromServerSession(todaySession);
@@ -598,20 +749,25 @@ const App = {
   },
 
   async syncSettingsFromServer() {
-    const remoteSettings = await API_SERVICE.getSettings();
+    const remoteSettings = await API_SERVICE.getSettings(this.activeChild.id);
     if (!remoteSettings.initialized) {
       const initialSettings = this.pendingLocalSettings || this.settings;
       const payload = { bedtime: initialSettings.bedtime };
       if (!remoteSettings.pin_configured) {
         payload.parent_pin = initialSettings.parentPin || '1234';
       }
-      await API_SERVICE.updateSettings(payload);
+      await API_SERVICE.updateSettings(this.activeChild.id, payload);
       this.settings = { bedtime: initialSettings.bedtime };
     } else {
       this.settings = { bedtime: remoteSettings.bedtime };
     }
+    this.activeChild = { ...this.activeChild, bedtime: this.settings.bedtime };
+    this.children = this.children.map(child =>
+      child.id === this.activeChild.id ? this.activeChild : child
+    );
     Storage.saveSettings(this.settings);
     this.updateBedtimeDisplay();
+    this.renderChildSwitcher();
   },
 
   localRecordToImport(record) {
@@ -639,12 +795,15 @@ const App = {
       .slice(0, 100);
     if (records.length === 0) return;
 
-    await API_SERVICE.importSessions(records.map(record => this.localRecordToImport(record)));
+    await API_SERVICE.importSessions(
+      this.activeChild.id,
+      records.map(record => this.localRecordToImport(record))
+    );
     Storage.markLocalRecordsMigrated(records.map(record => record.date), this.user.user_id);
     this.pendingLocalRecords = [];
   },
 
-  restoreFromServerSession(session) {
+  restoreFromServerSession(session, { showSurfaces = true } = {}) {
     const serverState = Object.values(STATE).includes(session.state) ? session.state : STATE.IDLE;
     this.state = session.completed ? STATE.COMPLETED : serverState;
     this.startTime = session.start_time || null;
@@ -660,8 +819,13 @@ const App = {
 
     if (this.state === STATE.COMPLETED) {
       const record = this.serverSessionToRecord(session);
-      if (record.callItADay) this.showCallItADayPage(record);
-      else this.showCelebration(record);
+      if (showSurfaces) {
+        if (record.callItADay) this.showCallItADayPage(record);
+        else this.showCelebration(record);
+      } else {
+        this.updateUI();
+        this.updateTimerDisplay();
+      }
       return;
     }
 
@@ -671,9 +835,9 @@ const App = {
       this.startEncouragementRotation();
     } else if (this.state === STATE.PAUSED) {
       this.pauseStart = Date.now();
-      this.showPausedOverlay();
+      if (showSurfaces) this.showPausedOverlay();
     } else if (this.state === STATE.REVIEWING) {
-      this.showParentConfirm();
+      if (showSurfaces) this.showParentConfirm();
     }
 
     this.saveTodayState();
@@ -733,6 +897,7 @@ const App = {
     if (this.currentSessionId) return this.currentSessionId;
     if (!this.sessionPromise) {
       this.sessionPromise = API_SERVICE.createSession(
+        this.activeChild.id,
         TimeUtils.getBeijingDateStr(),
         this.settings.bedtime
       ).then(session => {
@@ -1464,6 +1629,8 @@ const App = {
     const page = document.getElementById('page-timer');
     page.style.display = '';
     page.classList.add('active');
+    if (this.state === STATE.PAUSED) this.showPausedOverlay();
+    if (this.state === STATE.REVIEWING) this.showParentConfirm();
   },
 
   async verifyPin() {
@@ -1499,6 +1666,7 @@ const App = {
       document.getElementById('stats-content').style.display = '';
       this.loadStatsData();
       this.loadSettings();
+      this.renderFamilyProfiles();
     } else {
       if (!hint.textContent.startsWith('网络不可用')) hint.textContent = '密码不正确，请重试';
       this.showPinError();
@@ -1680,16 +1848,27 @@ const App = {
   loadSettings() {
     document.getElementById('setting-bedtime').value = this.settings.bedtime;
     document.getElementById('setting-pin').value = '';
+    const nameItem = document.getElementById('setting-child-name-item');
+    const nameInput = document.getElementById('setting-child-name');
+    nameItem.style.display = this.apiReady ? 'flex' : 'none';
+    nameInput.value = this.activeChild?.name || '';
   },
 
   async saveSettings() {
     const bedtime = document.getElementById('setting-bedtime').value;
     const pin = document.getElementById('setting-pin').value;
+    const childName = document.getElementById('setting-child-name').value.trim();
     const btn = document.getElementById('btn-save-settings');
     const originalText = btn.textContent;
 
     if (pin && !/^\d{4}$/.test(pin)) {
       btn.textContent = '⚠️ 密码需4位数字';
+      setTimeout(() => { btn.textContent = originalText; }, 2000);
+      return;
+    }
+
+    if (this.apiReady && !childName) {
+      btn.textContent = '⚠️ 请输入孩子昵称';
       setTimeout(() => { btn.textContent = originalText; }, 2000);
       return;
     }
@@ -1706,8 +1885,21 @@ const App = {
       if (this.apiReady) {
         const payload = { bedtime: this.settings.bedtime };
         if (pin) payload.parent_pin = pin;
-        await API_SERVICE.updateSettings(payload);
-        await this.syncCurrentSession();
+        await API_SERVICE.updateSettings(this.activeChild.id, payload);
+        if (childName !== this.activeChild.name || bedtime !== this.activeChild.bedtime) {
+          this.activeChild = await API_SERVICE.updateChild(this.activeChild.id, {
+            name: childName,
+            bedtime: this.settings.bedtime
+          });
+          this.children = this.children.map(child =>
+            child.id === this.activeChild.id ? this.activeChild : child
+          );
+          this.renderChildSwitcher();
+          this.renderFamilyProfiles();
+        }
+        if (this.currentSessionId || this.state !== STATE.IDLE) {
+          await this.syncCurrentSession();
+        }
         btn.textContent = '✅ 已同步';
       }
     } catch (error) {
@@ -1721,31 +1913,38 @@ const App = {
   exportData() {
     const records = Storage.getRecords();
     const settings = Storage.getSettings();
-    const data = { records, settings, exportDate: new Date().toISOString() };
+    const data = {
+      child: this.activeChild || null,
+      records,
+      settings,
+      exportDate: new Date().toISOString()
+    };
 
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `homework-data-${TimeUtils.getBeijingDateStr()}.json`;
+    const childLabel = this.activeChild ? `-${this.activeChild.id}` : '';
+    a.download = `homework-data${childLabel}-${TimeUtils.getBeijingDateStr()}.json`;
     a.click();
     URL.revokeObjectURL(url);
   },
 
   async clearAllData() {
-    if (!confirm('警告：这将永久清除全部作业记录（账号和设置会保留）。\n\n您确定要继续吗？')) return;
+    const childName = this.activeChild?.name || '当前孩子';
+    if (!confirm(`警告：这将永久清除${childName}的全部作业记录（其他孩子、账号和设置会保留）。\n\n您确定要继续吗？`)) return;
 
     const button = document.getElementById('btn-clear-data');
     button.disabled = true;
     button.textContent = '正在清空…';
     try {
-      if (this.apiReady) await API_SERVICE.deleteAllSessions();
+      if (this.apiReady) await API_SERVICE.deleteAllSessions(this.activeChild.id);
       Storage.saveRecords([]);
       Storage.clearTodayState();
       this.state = STATE.IDLE;
       this.currentSessionId = null;
       this.sessionPromise = null;
-      alert('作业记录已清空，账号和设置仍保留。');
+      alert(`${this.activeChild?.name || '当前孩子'}的作业记录已清空，账号和设置仍保留。`);
       location.reload();
     } catch (error) {
       button.disabled = false;
