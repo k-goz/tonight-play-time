@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node backend/server.js",
     "dev": "node backend/server.js",
-    "check": "node --check app.js && node --check api-service.js && node --check service-worker.js && node --check backend/server.js",
+    "check": "node --check time-utils.js && node --check app.js && node --check api-service.js && node --check service-worker.js && node --check backend/server.js",
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {

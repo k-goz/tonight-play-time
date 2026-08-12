@@ -768,11 +768,12 @@ body {
 
 .stars-grid {
   display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: 0.5rem;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: clamp(0.25rem, 1.25vw, 0.5rem);
 }
 
 .star-day {
+  min-width: 0;
   text-align: center;
   padding: 0.5rem 0.25rem;
   background: var(--color-card-bg);
@@ -787,7 +788,8 @@ body {
 }
 
 .star-day .day-stars {
-  font-size: 1.2rem;
+  font-size: clamp(0.75rem, 3.2vw, 1.2rem);
+  white-space: nowrap;
 }
 
 .star-day .day-date {

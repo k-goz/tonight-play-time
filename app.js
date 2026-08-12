@@ -63,124 +63,8 @@ const TITLES = [
   '认真小明星'
 ];
 
-/** 星期名称 */
-const WEEKDAYS = ['日', '一', '二', '三', '四', '五', '六'];
-
 /** 计时刷新间隔（毫秒） */
 const TICK_INTERVAL = 200;
-
-// =============================================
-// 二、时间工具函数
-// =============================================
-
-const TimeUtils = {
-  getParts(date = new Date()) {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: 'Asia/Shanghai',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hourCycle: 'h23',
-      weekday: 'short'
-    }).formatToParts(date);
-    return Object.fromEntries(parts.map(part => [part.type, part.value]));
-  },
-
-  /**
-   * 获取当前时刻。显示和日期拆分统一通过 Asia/Shanghai 时区完成。
-   */
-  getBeijingNow() {
-    return new Date();
-  },
-
-  /**
-   * 格式化时间为 HH:MM:SS
-   */
-  formatTime(date) {
-    const parts = this.getParts(date);
-    return `${parts.hour}:${parts.minute}:${parts.second}`;
-  },
-
-  /**
-   * 格式化日期为 YYYY年MM月DD日 星期X
-   */
-  formatDate(date) {
-    const parts = this.getParts(date);
-    const weekdayMap = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
-    return `${parts.year}年${Number(parts.month)}月${Number(parts.day)}日 星期${weekdayMap[parts.weekday]}`;
-  },
-
-  /**
-   * 获取北京时间日期字符串 YYYY-MM-DD
-   */
-  getBeijingDateStr(date) {
-    const parts = this.getParts(date || this.getBeijingNow());
-    return `${parts.year}-${parts.month}-${parts.day}`;
-  },
-
-  /**
-   * 获取北京时间时间字符串 HH:MM:SS
-   */
-  getBeijingTimeStr(date) {
-    const parts = this.getParts(date || this.getBeijingNow());
-    return `${parts.hour}:${parts.minute}:${parts.second}`;
-  },
-
-  /**
-   * 获取今天睡觉时间的 Date 对象（北京时间）
-   */
-  getBedtimeDate(bedtimeStr) {
-    const now = this.getBeijingNow();
-    const [h, m] = bedtimeStr.split(':').map(Number);
-    const parts = this.getParts(now);
-    const currentSeconds = Number(parts.hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second);
-    const bedtimeSeconds = h * 3600 + m * 60;
-    return new Date(now.getTime() + (bedtimeSeconds - currentSeconds) * 1000);
-  },
-
-  /**
-   * 计算距离睡觉时间的剩余秒数
-   */
-  getSecondsToBedtime(bedtimeStr) {
-    const now = this.getBeijingNow();
-    const bedtime = this.getBedtimeDate(bedtimeStr);
-    const diff = bedtime - now;
-    return Math.max(0, Math.floor(diff / 1000));
-  },
-
-  /**
-   * 将秒数格式化为可读文本
-   */
-  formatDuration(totalSeconds) {
-    if (totalSeconds <= 0) return '0 分钟';
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-
-    if (hours > 0) {
-      return minutes > 0 ? `${hours} 小时 ${minutes} 分钟` : `${hours} 小时`;
-    }
-    if (minutes > 0) {
-      return seconds > 0 ? `${minutes} 分钟 ${seconds} 秒` : `${minutes} 分钟`;
-    }
-    return `${seconds} 秒`;
-  },
-
-  /**
-   * 将秒数格式化为短文本（用于显示）
-   */
-  formatDurationShort(totalSeconds) {
-    if (totalSeconds <= 0) return '0分钟';
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    if (hours > 0 && minutes > 0) return `${hours}h${minutes}m`;
-    if (hours > 0) return `${hours}h`;
-    return `${minutes}分钟`;
-  }
-};
 
 // =============================================
 // 音效工具
@@ -247,12 +131,26 @@ function escapeHtml(value) {
 // =============================================
 
 const Storage = {
+  accountUserId: null,
+
+  useAccount(userId) {
+    this.accountUserId = userId ? String(userId) : null;
+  },
+
+  scopedKey(key) {
+    return this.accountUserId ? `${key}_user_${this.accountUserId}` : key;
+  },
+
+  has(key) {
+    return localStorage.getItem(this.scopedKey(key)) !== null;
+  },
+
   /**
    * 读取 JSON 数据
    */
   get(key, defaultValue) {
     try {
-      const data = localStorage.getItem(key);
+      const data = localStorage.getItem(this.scopedKey(key));
       return data ? JSON.parse(data) : defaultValue;
     } catch (e) {
       console.warn('Storage read error:', e);
@@ -265,7 +163,7 @@ const Storage = {
    */
   set(key, value) {
     try {
-      localStorage.setItem(key, JSON.stringify(value));
+      localStorage.setItem(this.scopedKey(key), JSON.stringify(value));
     } catch (e) {
       console.warn('Storage write error:', e);
     }
@@ -300,20 +198,63 @@ const Storage = {
 
   /** 清除今日状态 */
   clearTodayState() {
-    localStorage.removeItem(STORAGE_KEYS.TODAY_STATE);
+    localStorage.removeItem(this.scopedKey(STORAGE_KEYS.TODAY_STATE));
   },
 
   /** 获取设置 */
   getSettings() {
-    return this.get(STORAGE_KEYS.SETTINGS, {
-      bedtime: '21:30',
-      parentPin: '1234'
-    });
+    const defaults = this.accountUserId
+      ? { bedtime: '21:30' }
+      : { bedtime: '21:30', parentPin: '1234' };
+    return this.get(STORAGE_KEYS.SETTINGS, defaults);
   },
 
   /** 保存设置 */
   saveSettings(settings) {
-    this.set(STORAGE_KEYS.SETTINGS, settings);
+    const safeSettings = this.accountUserId
+      ? { bedtime: settings.bedtime }
+      : settings;
+    this.set(STORAGE_KEYS.SETTINGS, safeSettings);
+  },
+
+  getLocalRecords() {
+    return this.getRaw(STORAGE_KEYS.RECORDS, []);
+  },
+
+  getLocalSettings() {
+    return this.getRaw(STORAGE_KEYS.SETTINGS, { bedtime: '21:30', parentPin: '1234' });
+  },
+
+  getLocalTodayState() {
+    return this.getRaw(STORAGE_KEYS.TODAY_STATE, null);
+  },
+
+  getRaw(key, defaultValue) {
+    try {
+      const data = localStorage.getItem(key);
+      return data ? JSON.parse(data) : defaultValue;
+    } catch (error) {
+      console.warn('Storage read error:', error);
+      return defaultValue;
+    }
+  },
+
+  moveLocalTodayStateToAccount() {
+    if (!this.accountUserId || this.has(STORAGE_KEYS.TODAY_STATE)) return;
+    const localState = this.getLocalTodayState();
+    if (!localState) return;
+    this.saveTodayState(localState);
+    localStorage.removeItem(STORAGE_KEYS.TODAY_STATE);
+  },
+
+  markLocalRecordsMigrated(dates, userId) {
+    const dateSet = new Set(dates);
+    const records = this.getLocalRecords().map(record =>
+      dateSet.has(record.date) && !record.migratedToAccount
+        ? { ...record, migratedToAccount: String(userId) }
+        : record
+    );
+    localStorage.setItem(STORAGE_KEYS.RECORDS, JSON.stringify(records));
   }
 };
 
@@ -363,23 +304,31 @@ const App = {
     this.currentSessionId = null;
     this.sessionPromise = null;
     this.lastPersistedBucket = -1;
+    this.pendingLocalRecords = [];
+    this.pendingLocalSettings = null;
 
     // Check if user is logged in
     if (API_SERVICE.isLoggedIn()) {
       this.apiReady = true;
       this.user = API_SERVICE.user;
       console.log('User logged in:', this.user.nickname);
+      this.activateAccountStorage();
+    } else {
+      Storage.useAccount(null);
     }
 
     this.settings = Storage.getSettings();
     this.updateBedtimeDisplay();
     this.bindEvents();
     this.bindAuthEvents();
-    this.restoreTodayState();
+    if (this.apiReady || localStorage.getItem('skip_auth') === 'true') {
+      this.restoreTodayState();
+    }
     this.updateUI();
     this.updateTimerDisplay();
     this.startClock();
     this.registerSW();
+    this.checkAuthState();
   },
 
   updateBedtimeDisplay() {
@@ -485,8 +434,6 @@ const App = {
       this.skipAuth();
     });
 
-    // 检查是否需要显示登录页
-    this.checkAuthState();
   },
 
   checkAuthState() {
@@ -512,6 +459,8 @@ const App = {
       await API_SERVICE.login(username, password);
       this.user = API_SERVICE.user;
       this.apiReady = true;
+      this.activateAccountStorage();
+      this.loadStorageContext();
       this.enterApp();
     } catch (error) {
       errorEl.textContent = error.message;
@@ -541,6 +490,8 @@ const App = {
       await API_SERVICE.register(username, nickname, password);
       this.user = API_SERVICE.user;
       this.apiReady = true;
+      this.activateAccountStorage();
+      this.loadStorageContext();
       this.enterApp();
     } catch (error) {
       errorEl.textContent = error.message;
@@ -551,7 +502,38 @@ const App = {
   skipAuth() {
     localStorage.setItem('skip_auth', 'true');
     this.apiReady = false;
+    this.user = null;
+    Storage.useAccount(null);
+    this.loadStorageContext();
     this.enterApp();
+  },
+
+  activateAccountStorage() {
+    if (!this.user?.user_id) return;
+    this.pendingLocalRecords = Storage.getLocalRecords().filter(record => !record.migratedToAccount);
+    this.pendingLocalSettings = Storage.getLocalSettings();
+    Storage.useAccount(this.user.user_id);
+
+    if (!Storage.has(STORAGE_KEYS.SETTINGS)) {
+      Storage.saveSettings({ bedtime: this.pendingLocalSettings.bedtime });
+    }
+    Storage.moveLocalTodayStateToAccount();
+  },
+
+  loadStorageContext() {
+    this.stopTimer();
+    this.stopEncouragementRotation();
+    this.state = STATE.IDLE;
+    this.startTime = null;
+    this.homeworkSeconds = 0;
+    this.pausedSeconds = 0;
+    this.pauseStart = null;
+    this.frozenRemainingSeconds = null;
+    this.settings = Storage.getSettings();
+    this.updateBedtimeDisplay();
+    this.restoreTodayState();
+    this.updateUI();
+    this.updateTimerDisplay();
   },
 
   enterApp() {
@@ -589,8 +571,10 @@ const App = {
     if (!this.apiReady) return;
 
     try {
+      await this.syncSettingsFromServer();
+      await this.migrateLocalRecordsToServer();
       const today = TimeUtils.getBeijingDateStr();
-      const sessions = await API_SERVICE.getSessions(30);
+      const sessions = await API_SERVICE.getSessions(100);
       const todaySession = sessions.find(s => s.date === today);
 
       this.mergeServerRecords(sessions);
@@ -598,7 +582,9 @@ const App = {
       if (todaySession) {
         this.currentSessionId = todaySession.id;
         const localState = Storage.getTodayState();
-        if (localState && localState.date === today && localState.state !== STATE.COMPLETED) {
+        if (todaySession.completed) {
+          this.restoreFromServerSession(todaySession);
+        } else if (localState && localState.date === today && localState.state !== STATE.COMPLETED) {
           await this.syncCurrentSession();
         } else {
           this.restoreFromServerSession(todaySession);
@@ -609,6 +595,53 @@ const App = {
     } catch (error) {
       console.warn('Failed to sync from server:', error);
     }
+  },
+
+  async syncSettingsFromServer() {
+    const remoteSettings = await API_SERVICE.getSettings();
+    if (!remoteSettings.initialized) {
+      const initialSettings = this.pendingLocalSettings || this.settings;
+      const payload = { bedtime: initialSettings.bedtime };
+      if (!remoteSettings.pin_configured) {
+        payload.parent_pin = initialSettings.parentPin || '1234';
+      }
+      await API_SERVICE.updateSettings(payload);
+      this.settings = { bedtime: initialSettings.bedtime };
+    } else {
+      this.settings = { bedtime: remoteSettings.bedtime };
+    }
+    Storage.saveSettings(this.settings);
+    this.updateBedtimeDisplay();
+  },
+
+  localRecordToImport(record) {
+    const checklist = record.checklist || {};
+    return {
+      date: record.date,
+      bedtime: this.settings.bedtime,
+      start_time: record.startTime || null,
+      end_time: record.finishTime || null,
+      homework_seconds: Math.max(0, Number(record.homeworkDurationSeconds) || 0),
+      paused_seconds: Math.max(0, Number(record.pausedDurationSeconds) || 0),
+      remaining_seconds: Math.max(0, Number(record.remainingSeconds) || 0),
+      homework_done: Boolean(checklist.homeworkDone),
+      correction_done: Boolean(checklist.correctionsDone),
+      attitude_good: Boolean(checklist.attitudeGood),
+      reward_choice: record.rewardChoice || null,
+      title: record.title || null,
+      call_it_a_day: Boolean(record.callItADay)
+    };
+  },
+
+  async migrateLocalRecordsToServer() {
+    const records = this.pendingLocalRecords
+      .filter(record => /^\d{4}-\d{2}-\d{2}$/.test(record.date || ''))
+      .slice(0, 100);
+    if (records.length === 0) return;
+
+    await API_SERVICE.importSessions(records.map(record => this.localRecordToImport(record)));
+    Storage.markLocalRecordsMigrated(records.map(record => record.date), this.user.user_id);
+    this.pendingLocalRecords = [];
   },
 
   restoreFromServerSession(session) {
@@ -1419,6 +1452,9 @@ const App = {
     document.getElementById('pin-input').value = '';
     document.getElementById('pin-area').style.display = '';
     document.getElementById('stats-content').style.display = 'none';
+    document.querySelector('.pin-hint').textContent = this.apiReady
+      ? '账号模式：使用云端家长密码'
+      : '默认密码：1234';
   },
 
   hideStatsPage() {
@@ -1430,18 +1466,50 @@ const App = {
     page.classList.add('active');
   },
 
-  verifyPin() {
+  async verifyPin() {
     const input = document.getElementById('pin-input').value;
-    if (input === this.settings.parentPin) {
+    const button = document.getElementById('btn-pin');
+    const hint = document.querySelector('.pin-hint');
+    let valid = false;
+
+    if (!/^\d{4}$/.test(input)) {
+      hint.textContent = '请输入4位数字密码';
+      this.showPinError();
+      return;
+    }
+
+    button.disabled = true;
+    button.textContent = '验证中…';
+    try {
+      if (this.apiReady) {
+        const result = await API_SERVICE.verifyParentPin(input);
+        valid = result.valid;
+      } else {
+        valid = input === this.settings.parentPin;
+      }
+    } catch (error) {
+      hint.textContent = '网络不可用，账号模式需联网验证家长密码';
+    } finally {
+      button.disabled = false;
+      button.textContent = '确认';
+    }
+
+    if (valid) {
       document.getElementById('pin-area').style.display = 'none';
       document.getElementById('stats-content').style.display = '';
       this.loadStatsData();
       this.loadSettings();
     } else {
-      document.getElementById('pin-input').value = '';
-      document.getElementById('pin-input').classList.add('shake');
-      setTimeout(() => document.getElementById('pin-input').classList.remove('shake'), 500);
+      if (!hint.textContent.startsWith('网络不可用')) hint.textContent = '密码不正确，请重试';
+      this.showPinError();
     }
+  },
+
+  showPinError() {
+    const input = document.getElementById('pin-input');
+    input.value = '';
+    input.classList.add('shake');
+    setTimeout(() => input.classList.remove('shake'), 500);
   },
 
   loadStatsData() {
@@ -1614,24 +1682,40 @@ const App = {
     document.getElementById('setting-pin').value = '';
   },
 
-  saveSettings() {
+  async saveSettings() {
     const bedtime = document.getElementById('setting-bedtime').value;
     const pin = document.getElementById('setting-pin').value;
-
-    if (bedtime) this.settings.bedtime = bedtime;
-    if (pin && /^\d{4}$/.test(pin)) this.settings.parentPin = pin;
-
-    Storage.saveSettings(this.settings);
-
-    // 更新页面上的睡觉时间显示
-    const [h, m] = this.settings.bedtime.split(':');
-    document.querySelector('.bedtime-info').textContent = `💤 睡觉时间：晚上 ${h}:${m}`;
-
-    // 显示保存成功提示
     const btn = document.getElementById('btn-save-settings');
     const originalText = btn.textContent;
-    btn.textContent = '✅ 已保存';
-    setTimeout(() => { btn.textContent = originalText; }, 1500);
+
+    if (pin && !/^\d{4}$/.test(pin)) {
+      btn.textContent = '⚠️ 密码需4位数字';
+      setTimeout(() => { btn.textContent = originalText; }, 2000);
+      return;
+    }
+
+    if (bedtime) this.settings.bedtime = bedtime;
+    if (pin && !this.apiReady) this.settings.parentPin = pin;
+
+    Storage.saveSettings(this.settings);
+    this.updateBedtimeDisplay();
+
+    btn.disabled = true;
+    btn.textContent = this.apiReady ? '正在同步…' : '✅ 已保存';
+    try {
+      if (this.apiReady) {
+        const payload = { bedtime: this.settings.bedtime };
+        if (pin) payload.parent_pin = pin;
+        await API_SERVICE.updateSettings(payload);
+        await this.syncCurrentSession();
+        btn.textContent = '✅ 已同步';
+      }
+    } catch (error) {
+      btn.textContent = '⚠️ 仅本地保存';
+    } finally {
+      btn.disabled = false;
+      setTimeout(() => { btn.textContent = originalText; }, 2000);
+    }
   },
 
   exportData() {
@@ -1648,11 +1732,25 @@ const App = {
     URL.revokeObjectURL(url);
   },
 
-  clearAllData() {
-    if (confirm('警告：这将会清除所有的作业记录和设置（此操作不可恢复）！\n\n您确定要继续吗？')) {
-      localStorage.clear();
-      alert('所有数据已清空。');
+  async clearAllData() {
+    if (!confirm('警告：这将永久清除全部作业记录（账号和设置会保留）。\n\n您确定要继续吗？')) return;
+
+    const button = document.getElementById('btn-clear-data');
+    button.disabled = true;
+    button.textContent = '正在清空…';
+    try {
+      if (this.apiReady) await API_SERVICE.deleteAllSessions();
+      Storage.saveRecords([]);
+      Storage.clearTodayState();
+      this.state = STATE.IDLE;
+      this.currentSessionId = null;
+      this.sessionPromise = null;
+      alert('作业记录已清空，账号和设置仍保留。');
       location.reload();
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = '🗑️ 清空记录';
+      alert('云端记录清空失败，请检查网络后重试。');
     }
   },
 

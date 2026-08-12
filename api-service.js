@@ -147,6 +147,33 @@ const API_SERVICE = {
   },
 
   /**
+   * Get account-level parent settings. The PIN is never returned.
+   */
+  async getSettings() {
+    return await this.request('/api/settings');
+  },
+
+  /**
+   * Save bedtime and optionally replace the parent PIN.
+   */
+  async updateSettings(settings) {
+    return await this.request('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify(settings)
+    });
+  },
+
+  /**
+   * Verify the parent PIN without downloading it to the browser.
+   */
+  async verifyParentPin(parentPin) {
+    return await this.request('/api/settings/verify-pin', {
+      method: 'POST',
+      body: JSON.stringify({ parent_pin: parentPin })
+    });
+  },
+
+  /**
    * Create homework session
    */
   async createSession(date, bedtime = '21:30') {
@@ -164,6 +191,16 @@ const API_SERVICE = {
   },
 
   /**
+   * Import completed records created in local-only mode.
+   */
+  async importSessions(records) {
+    return await this.request('/api/sessions/import', {
+      method: 'POST',
+      body: JSON.stringify({ records })
+    });
+  },
+
+  /**
    * Update session
    */
   async updateSession(sessionId, data) {
@@ -178,6 +215,15 @@ const API_SERVICE = {
    */
   async deleteSession(sessionId) {
     return await this.request(`/api/sessions/${sessionId}`, {
+      method: 'DELETE'
+    });
+  },
+
+  /**
+   * Delete every session owned by the current account.
+   */
+  async deleteAllSessions() {
+    return await this.request('/api/sessions', {
       method: 'DELETE'
     });
   },

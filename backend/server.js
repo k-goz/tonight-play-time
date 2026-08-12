@@ -46,8 +46,13 @@ db.serialize(() => {
     nickname TEXT NOT NULL,
     password_hash TEXT NOT NULL,
     pin_code TEXT DEFAULT '1234',
+    parent_pin_hash TEXT,
+    bedtime TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
   )`);
+
+  addColumn('users', 'parent_pin_hash', 'TEXT');
+  addColumn('users', 'bedtime', 'TEXT');
 
   db.run(`CREATE TABLE IF NOT EXISTS homework_sessions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -170,6 +175,15 @@ function validBedtime(bedtime) {
   return typeof bedtime === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(bedtime);
 }
 
+function validPin(pin) {
+  return typeof pin === 'string' && /^\d{4}$/.test(pin);
+}
+
+function shortText(value, maxLength = 100) {
+  return value === null || value === undefined ||
+    (typeof value === 'string' && value.length <= maxLength);
+}
+
 app.post('/api/auth/register', (req, res) => {
   const username = typeof req.body.username === 'string' ? req.body.username.trim() : '';
   const nickname = typeof req.body.nickname === 'string' ? req.body.nickname.trim() : '';
@@ -190,7 +204,7 @@ app.post('/api/auth/register', (req, res) => {
     if (existing) return res.status(400).json({ detail: '用户名已存在' });
 
     db.run(
-      'INSERT INTO users (username, nickname, password_hash) VALUES (?, ?, ?)',
+      'INSERT INTO users (username, nickname, password_hash, pin_code) VALUES (?, ?, ?, NULL)',
       [username, nickname, hashPassword(password)],
       function onInsert(insertError) {
         if (insertError) {
@@ -249,6 +263,82 @@ app.get('/api/auth/me', auth, (req, res) => {
   });
 });
 
+// ==================== Parent Settings ====================
+
+app.get('/api/settings', auth, (req, res) => {
+  db.get(
+    'SELECT bedtime, parent_pin_hash, pin_code FROM users WHERE id = ?',
+    [req.userId],
+    (error, user) => {
+      if (error) return res.status(500).json({ detail: '设置读取失败' });
+      if (!user) return res.status(404).json({ detail: '用户不存在' });
+      res.json({
+        bedtime: user.bedtime || null,
+        initialized: Boolean(user.bedtime),
+        pin_configured: Boolean(
+          user.parent_pin_hash || (user.pin_code && user.pin_code !== '1234')
+        )
+      });
+    }
+  );
+});
+
+app.put('/api/settings', auth, (req, res) => {
+  const updates = [];
+  const values = [];
+
+  if (req.body.bedtime !== undefined) {
+    if (!validBedtime(req.body.bedtime)) {
+      return res.status(400).json({ detail: '睡觉时间格式不正确' });
+    }
+    updates.push('bedtime = ?');
+    values.push(req.body.bedtime);
+  }
+
+  if (req.body.parent_pin !== undefined) {
+    if (!validPin(req.body.parent_pin)) {
+      return res.status(400).json({ detail: '家长密码必须是4位数字' });
+    }
+    updates.push('parent_pin_hash = ?', 'pin_code = NULL');
+    values.push(hashPassword(req.body.parent_pin));
+  }
+
+  if (updates.length === 0) return res.status(400).json({ detail: '没有可保存的设置' });
+
+  values.push(req.userId);
+  db.run(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, values, function onUpdate(error) {
+    if (error) return res.status(500).json({ detail: '设置保存失败' });
+    if (this.changes === 0) return res.status(404).json({ detail: '用户不存在' });
+    res.json({ bedtime: req.body.bedtime || null, saved: true });
+  });
+});
+
+app.post('/api/settings/verify-pin', auth, (req, res) => {
+  const pin = req.body.parent_pin;
+  if (!validPin(pin)) return res.status(400).json({ detail: '家长密码必须是4位数字' });
+
+  db.get(
+    'SELECT parent_pin_hash, pin_code FROM users WHERE id = ?',
+    [req.userId],
+    (error, user) => {
+      if (error) return res.status(500).json({ detail: '家长密码验证失败' });
+      if (!user) return res.status(404).json({ detail: '用户不存在' });
+
+      const valid = user.parent_pin_hash
+        ? verifyPassword(pin, user.parent_pin_hash)
+        : pin === (user.pin_code || '1234');
+
+      if (valid && !user.parent_pin_hash) {
+        db.run(
+          'UPDATE users SET parent_pin_hash = ?, pin_code = NULL WHERE id = ?',
+          [hashPassword(pin), req.userId]
+        );
+      }
+      res.json({ valid });
+    }
+  );
+});
+
 app.post('/api/sessions', auth, (req, res) => {
   const { date, bedtime = '21:30' } = req.body;
   if (!validDate(date) || !validBedtime(bedtime)) {
@@ -285,6 +375,112 @@ app.get('/api/sessions', auth, (req, res) => {
       res.json(sessions || []);
     }
   );
+});
+
+function normalizeImportedRecord(record) {
+  if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+  if (!validDate(record.date) || !validBedtime(record.bedtime || '21:30')) return null;
+
+  const numberFields = ['homework_seconds', 'paused_seconds', 'remaining_seconds'];
+  if (numberFields.some(key => !Number.isFinite(record[key]) || record[key] < 0)) return null;
+  if (!shortText(record.start_time) || !shortText(record.end_time) ||
+      !shortText(record.reward_choice, 50) || !shortText(record.title, 50)) return null;
+
+  return {
+    date: record.date,
+    bedtime: record.bedtime || '21:30',
+    homeworkSeconds: record.homework_seconds,
+    pausedSeconds: record.paused_seconds,
+    remainingSeconds: record.remaining_seconds,
+    startTime: record.start_time || null,
+    endTime: record.end_time || null,
+    homeworkDone: Boolean(record.homework_done),
+    correctionDone: Boolean(record.correction_done),
+    attitudeGood: Boolean(record.attitude_good),
+    rewardChoice: record.reward_choice || null,
+    title: record.title || null,
+    callItADay: Boolean(record.call_it_a_day)
+  };
+}
+
+app.post('/api/sessions/import', auth, (req, res) => {
+  const records = req.body.records;
+  if (!Array.isArray(records) || records.length === 0 || records.length > 100) {
+    return res.status(400).json({ detail: '导入记录数量必须为1-100条' });
+  }
+
+  const normalized = records.map(normalizeImportedRecord);
+  if (normalized.some(record => !record)) {
+    return res.status(400).json({ detail: '导入记录格式不正确' });
+  }
+
+  let imported = 0;
+  let skipped = 0;
+  let index = 0;
+
+  const finish = (error) => {
+    if (error) {
+      return db.run('ROLLBACK', () => res.status(500).json({ detail: '记录导入失败' }));
+    }
+    db.run('COMMIT', (commitError) => {
+      if (commitError) return res.status(500).json({ detail: '记录导入失败' });
+      res.json({ imported, skipped });
+    });
+  };
+
+  const importNext = () => {
+    if (index >= normalized.length) return finish();
+    const record = normalized[index++];
+    const homeworkMinutes = record.homeworkSeconds / 60;
+    const playtimeMinutes = record.remainingSeconds / 60;
+
+    db.run(
+      `INSERT INTO homework_sessions (
+        user_id, date, homework_minutes, start_time, end_time, completed,
+        homework_done, correction_done, attitude_good, playtime_type,
+        playtime_minutes, bedtime, state, homework_seconds, paused_seconds,
+        remaining_seconds, reward_choice, title, call_it_a_day
+      ) VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(user_id, date) DO UPDATE SET
+        homework_minutes = excluded.homework_minutes,
+        start_time = excluded.start_time,
+        end_time = excluded.end_time,
+        completed = 1,
+        homework_done = excluded.homework_done,
+        correction_done = excluded.correction_done,
+        attitude_good = excluded.attitude_good,
+        playtime_type = excluded.playtime_type,
+        playtime_minutes = excluded.playtime_minutes,
+        bedtime = excluded.bedtime,
+        state = 'completed',
+        homework_seconds = excluded.homework_seconds,
+        paused_seconds = excluded.paused_seconds,
+        remaining_seconds = excluded.remaining_seconds,
+        reward_choice = excluded.reward_choice,
+        title = excluded.title,
+        call_it_a_day = excluded.call_it_a_day,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE homework_sessions.completed = 0`,
+      [
+        req.userId, record.date, homeworkMinutes, record.startTime, record.endTime,
+        record.homeworkDone, record.correctionDone, record.attitudeGood,
+        record.rewardChoice, playtimeMinutes, record.bedtime, record.homeworkSeconds,
+        record.pausedSeconds, record.remainingSeconds, record.rewardChoice,
+        record.title, record.callItADay
+      ],
+      function onImport(error) {
+        if (error) return finish(error);
+        if (this.changes > 0) imported += 1;
+        else skipped += 1;
+        importNext();
+      }
+    );
+  };
+
+  db.run('BEGIN IMMEDIATE', (error) => {
+    if (error) return res.status(500).json({ detail: '记录导入失败' });
+    importNext();
+  });
 });
 
 const SESSION_UPDATE_FIELDS = new Set([
@@ -360,6 +556,17 @@ app.put('/api/sessions/:id', auth, (req, res) => {
   );
 });
 
+app.delete('/api/sessions', auth, (req, res) => {
+  db.run(
+    'DELETE FROM homework_sessions WHERE user_id = ?',
+    [req.userId],
+    function onDelete(error) {
+      if (error) return res.status(500).json({ detail: '记录清空失败' });
+      res.json({ deleted: this.changes });
+    }
+  );
+});
+
 app.delete('/api/sessions/:id', auth, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ detail: '记录编号不正确' });
@@ -415,6 +622,7 @@ const PUBLIC_FILES = new Map([
   ['/', 'index.html'],
   ['/index.html', 'index.html'],
   ['/style.css', 'style.css'],
+  ['/time-utils.js', 'time-utils.js'],
   ['/app.js', 'app.js'],
   ['/api-service.js', 'api-service.js'],
   ['/service-worker.js', 'service-worker.js'],
