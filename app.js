@@ -74,57 +74,59 @@ const TICK_INTERVAL = 200;
 // =============================================
 
 const TimeUtils = {
+  getParts(date = new Date()) {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'Asia/Shanghai',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hourCycle: 'h23',
+      weekday: 'short'
+    }).formatToParts(date);
+    return Object.fromEntries(parts.map(part => [part.type, part.value]));
+  },
+
   /**
-   * 获取当前北京时间 Date 对象
+   * 获取当前时刻。显示和日期拆分统一通过 Asia/Shanghai 时区完成。
    */
   getBeijingNow() {
-    return new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+    return new Date();
   },
 
   /**
    * 格式化时间为 HH:MM:SS
    */
   formatTime(date) {
-    return date.toLocaleTimeString('zh-CN', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-      timeZone: 'Asia/Shanghai'
-    });
+    const parts = this.getParts(date);
+    return `${parts.hour}:${parts.minute}:${parts.second}`;
   },
 
   /**
    * 格式化日期为 YYYY年MM月DD日 星期X
    */
   formatDate(date) {
-    const y = date.getFullYear();
-    const m = date.getMonth() + 1;
-    const d = date.getDate();
-    const w = WEEKDAYS[date.getDay()];
-    return `${y}年${m}月${d}日 星期${w}`;
+    const parts = this.getParts(date);
+    const weekdayMap = { Sun: '日', Mon: '一', Tue: '二', Wed: '三', Thu: '四', Fri: '五', Sat: '六' };
+    return `${parts.year}年${Number(parts.month)}月${Number(parts.day)}日 星期${weekdayMap[parts.weekday]}`;
   },
 
   /**
    * 获取北京时间日期字符串 YYYY-MM-DD
    */
   getBeijingDateStr(date) {
-    const d = date || this.getBeijingNow();
-    const y = d.getFullYear();
-    const m = String(d.getMonth() + 1).padStart(2, '0');
-    const day = String(d.getDate()).padStart(2, '0');
-    return `${y}-${m}-${day}`;
+    const parts = this.getParts(date || this.getBeijingNow());
+    return `${parts.year}-${parts.month}-${parts.day}`;
   },
 
   /**
    * 获取北京时间时间字符串 HH:MM:SS
    */
   getBeijingTimeStr(date) {
-    const d = date || this.getBeijingNow();
-    const h = String(d.getHours()).padStart(2, '0');
-    const m = String(d.getMinutes()).padStart(2, '0');
-    const s = String(d.getSeconds()).padStart(2, '0');
-    return `${h}:${m}:${s}`;
+    const parts = this.getParts(date || this.getBeijingNow());
+    return `${parts.hour}:${parts.minute}:${parts.second}`;
   },
 
   /**
@@ -133,9 +135,10 @@ const TimeUtils = {
   getBedtimeDate(bedtimeStr) {
     const now = this.getBeijingNow();
     const [h, m] = bedtimeStr.split(':').map(Number);
-    const bedtime = new Date(now);
-    bedtime.setHours(h, m, 0, 0);
-    return bedtime;
+    const parts = this.getParts(now);
+    const currentSeconds = Number(parts.hour) * 3600 + Number(parts.minute) * 60 + Number(parts.second);
+    const bedtimeSeconds = h * 3600 + m * 60;
+    return new Date(now.getTime() + (bedtimeSeconds - currentSeconds) * 1000);
   },
 
   /**
@@ -228,6 +231,16 @@ const SoundUtils = {
     this.playTone(300, 'square', 0.1, 0.1);
   }
 };
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, character => ({
+    '&': '&amp;',
+    '<': '&lt;',
+    '>': '&gt;',
+    '"': '&quot;',
+    "'": '&#039;'
+  })[character]);
+}
 
 // =============================================
 // 三、存储工具
@@ -348,6 +361,8 @@ const App = {
     // Initialize API service
     this.apiReady = false;
     this.currentSessionId = null;
+    this.sessionPromise = null;
+    this.lastPersistedBucket = -1;
 
     // Check if user is logged in
     if (API_SERVICE.isLoggedIn()) {
@@ -361,6 +376,8 @@ const App = {
     this.bindEvents();
     this.bindAuthEvents();
     this.restoreTodayState();
+    this.updateUI();
+    this.updateTimerDisplay();
     this.startClock();
     this.registerSW();
   },
@@ -514,8 +531,8 @@ const App = {
       return;
     }
 
-    if (password.length < 4) {
-      errorEl.textContent = '密码至少4位';
+    if (password.length < 8) {
+      errorEl.textContent = '密码至少8位';
       errorEl.style.display = 'block';
       return;
     }
@@ -559,10 +576,12 @@ const App = {
 
     const userInfo = document.createElement('div');
     userInfo.className = 'user-info';
-    userInfo.innerHTML = `
-      <span class="user-avatar">${this.user.nickname.charAt(0)}</span>
-      <span>${this.user.nickname}</span>
-    `;
+    const avatar = document.createElement('span');
+    avatar.className = 'user-avatar';
+    avatar.textContent = this.user.nickname.charAt(0);
+    const nickname = document.createElement('span');
+    nickname.textContent = this.user.nickname;
+    userInfo.append(avatar, nickname);
     headerRight.insertBefore(userInfo, headerRight.firstChild);
   },
 
@@ -571,12 +590,19 @@ const App = {
 
     try {
       const today = TimeUtils.getBeijingDateStr();
-      const sessions = await API_SERVICE.getSessions(1);
+      const sessions = await API_SERVICE.getSessions(30);
       const todaySession = sessions.find(s => s.date === today);
+
+      this.mergeServerRecords(sessions);
 
       if (todaySession) {
         this.currentSessionId = todaySession.id;
-        this.restoreFromServerSession(todaySession);
+        const localState = Storage.getTodayState();
+        if (localState && localState.date === today && localState.state !== STATE.COMPLETED) {
+          await this.syncCurrentSession();
+        } else {
+          this.restoreFromServerSession(todaySession);
+        }
       }
 
       console.log('Data synced from server');
@@ -586,16 +612,130 @@ const App = {
   },
 
   restoreFromServerSession(session) {
-    if (session.completed) {
-      this.state = STATE.COMPLETED;
-      this.homeworkSeconds = session.homework_minutes * 60;
-      this.showCompletionPage(session);
+    const serverState = Object.values(STATE).includes(session.state) ? session.state : STATE.IDLE;
+    this.state = session.completed ? STATE.COMPLETED : serverState;
+    this.startTime = session.start_time || null;
+    this.homeworkSeconds = session.homework_seconds || session.homework_minutes * 60 || 0;
+    this.pausedSeconds = session.paused_seconds || 0;
+    this.frozenRemainingSeconds = session.remaining_seconds || null;
+    this.lastPersistedBucket = Math.floor(this.homeworkSeconds / 30);
+
+    if (this.state === STATE.RUNNING && this.startTime) {
+      const elapsed = (Date.now() - new Date(this.startTime).getTime()) / 1000 - this.pausedSeconds;
+      if (Number.isFinite(elapsed)) this.homeworkSeconds = Math.max(this.homeworkSeconds, elapsed);
+    }
+
+    if (this.state === STATE.COMPLETED) {
+      const record = this.serverSessionToRecord(session);
+      if (record.callItADay) this.showCallItADayPage(record);
+      else this.showCelebration(record);
+      return;
+    }
+
+    if (this.state === STATE.RUNNING) {
+      this.lastTick = Date.now();
+      this.startTimer();
+      this.startEncouragementRotation();
+    } else if (this.state === STATE.PAUSED) {
+      this.pauseStart = Date.now();
+      this.showPausedOverlay();
+    } else if (this.state === STATE.REVIEWING) {
+      this.showParentConfirm();
+    }
+
+    this.saveTodayState();
+    this.updateUI();
+    this.updateTimerDisplay();
+  },
+
+  serverSessionToRecord(session) {
+    const timePart = (value) => {
+      if (!value) return '--';
+      if (/^\d{2}:\d{2}/.test(value)) return value.slice(0, 8);
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? '--' : TimeUtils.getBeijingTimeStr(parsed);
+    };
+
+    return {
+      serverSessionId: session.id,
+      date: session.date,
+      startTime: timePart(session.start_time),
+      finishTime: timePart(session.end_time),
+      homeworkDurationSeconds: session.homework_seconds || session.homework_minutes * 60 || 0,
+      pausedDurationSeconds: session.paused_seconds || 0,
+      remainingSeconds: session.remaining_seconds || session.playtime_minutes * 60 || 0,
+      rewardChoice: session.reward_choice || session.playtime_type || '',
+      title: session.title || '时间小管家',
+      callItADay: Boolean(session.call_it_a_day),
+      checklist: {
+        homeworkDone: Boolean(session.homework_done),
+        correctionsDone: Boolean(session.correction_done),
+        attitudeGood: Boolean(session.attitude_good)
+      }
+    };
+  },
+
+  mergeServerRecords(sessions) {
+    const records = Storage.getRecords();
+    let changed = false;
+
+    sessions.filter(session => session.completed).forEach(session => {
+      const record = this.serverSessionToRecord(session);
+      const index = records.findIndex(existing =>
+        existing.serverSessionId === session.id || existing.date === session.date
+      );
+      if (index >= 0) records[index] = record;
+      else records.push(record);
+      changed = true;
+    });
+
+    if (changed) {
+      records.sort((a, b) => a.date.localeCompare(b.date));
+      Storage.saveRecords(records);
+    }
+  },
+
+  async ensureServerSession() {
+    if (!this.apiReady) return null;
+    if (this.currentSessionId) return this.currentSessionId;
+    if (!this.sessionPromise) {
+      this.sessionPromise = API_SERVICE.createSession(
+        TimeUtils.getBeijingDateStr(),
+        this.settings.bedtime
+      ).then(session => {
+        this.currentSessionId = session.id;
+        return session.id;
+      }).finally(() => {
+        this.sessionPromise = null;
+      });
+    }
+    return this.sessionPromise;
+  },
+
+  async syncCurrentSession(extra = {}) {
+    if (!this.apiReady) return;
+    try {
+      const sessionId = await this.ensureServerSession();
+      if (!sessionId) return;
+      const payload = {
+        state: this.state,
+        homework_seconds: Math.max(0, this.homeworkSeconds),
+        homework_minutes: Math.max(0, this.homeworkSeconds / 60),
+        paused_seconds: Math.max(0, this.pausedSeconds),
+        start_time: this.startTime,
+        bedtime: this.settings.bedtime,
+        completed: this.state === STATE.COMPLETED,
+        ...extra
+      };
+      await API_SERVICE.updateSession(sessionId, payload);
+    } catch (error) {
+      console.warn('Failed to sync current session:', error);
     }
   },
 
   async handleLogout() {
     if (confirm('确定要退出登录吗？')) {
-      API_SERVICE.logout();
+      await API_SERVICE.revokeToken();
       this.user = null;
       this.apiReady = false;
       localStorage.removeItem('skip_auth');
@@ -633,11 +773,13 @@ const App = {
     this.pauseStart = null;
     this.frozenRemainingSeconds = null;
     this.lastTick = Date.now();
+    this.lastPersistedBucket = 0;
 
     this.saveTodayState();
     this.updateUI();
     this.startTimer();
     this.startEncouragementRotation();
+    this.syncCurrentSession();
   },
 
   pauseHomework() {
@@ -648,6 +790,7 @@ const App = {
     this.saveTodayState();
     this.updateUI();
     this.showPausedOverlay();
+    this.syncCurrentSession();
   },
 
   resumeHomework() {
@@ -664,6 +807,7 @@ const App = {
     this.updateUI();
     this.startTimer();
     this.startEncouragementRotation();
+    this.syncCurrentSession();
   },
 
   finishHomework() {
@@ -675,6 +819,7 @@ const App = {
     this.saveTodayState();
     this.updateUI();
     this.showParentConfirm();
+    this.syncCurrentSession({ remaining_seconds: this.frozenRemainingSeconds });
   },
 
   retryHomework() {
@@ -688,6 +833,7 @@ const App = {
     this.updateUI();
     this.startTimer();
     this.startEncouragementRotation();
+    this.syncCurrentSession();
 
     // 显示提示
     this.showTemporaryTip('🕵️ 小侦探发现还有一点点需要修正，加油，马上就能解锁快乐时间！');
@@ -725,6 +871,18 @@ const App = {
     this.stopTimer();
     this.stopEncouragementRotation();
     this.hideParentConfirm();
+    this.syncCurrentSession({
+      end_time: now.toISOString(),
+      completed: true,
+      homework_done: record.checklist.homeworkDone,
+      correction_done: record.checklist.correctionsDone,
+      attitude_good: record.checklist.attitudeGood,
+      playtime_minutes: remainingSeconds / 60,
+      remaining_seconds: remainingSeconds,
+      reward_choice: '',
+      title: record.title,
+      call_it_a_day: false
+    });
     this.showCelebration(record);
   },
 
@@ -762,12 +920,26 @@ const App = {
     this.stopTimer();
     this.stopEncouragementRotation();
     this.hideParentConfirm();
+    this.syncCurrentSession({
+      end_time: now.toISOString(),
+      completed: true,
+      homework_done: record.checklist.homeworkDone,
+      correction_done: record.checklist.correctionsDone,
+      attitude_good: record.checklist.attitudeGood,
+      playtime_minutes: 0,
+      remaining_seconds: remainingSeconds,
+      reward_choice: '',
+      title: '',
+      call_it_a_day: true
+    });
     this.showCallItADayPage(record);
   },
 
   resetToday() {
     if (!confirm('确定要重新开始今天吗？当前的作业计时会被清除。')) return;
 
+    const previousState = this.state;
+    const serverSessionId = this.currentSessionId;
     this.state = STATE.IDLE;
     this.stopTimer();
     this.stopEncouragementRotation();
@@ -775,6 +947,18 @@ const App = {
     this.homeworkSeconds = 0;
     this.pausedSeconds = 0;
     this.startTime = null;
+    this.currentSessionId = null;
+    this.sessionPromise = null;
+    this.lastPersistedBucket = -1;
+    if (previousState === STATE.COMPLETED) {
+      const today = TimeUtils.getBeijingDateStr();
+      Storage.saveRecords(Storage.getRecords().filter(record => record.date !== today));
+    }
+    if (this.apiReady && serverSessionId) {
+      API_SERVICE.deleteSession(serverSessionId).catch(error =>
+        console.warn('Failed to delete server session:', error)
+      );
+    }
     this.updateUI();
   },
 
@@ -806,9 +990,12 @@ const App = {
     // 更新显示
     this.updateTimerDisplay();
 
-    // 每 30 秒保存一次状态
-    if (Math.floor(this.homeworkSeconds) % 30 === 0) {
+    // 每 30 秒保存并同步一次状态
+    const bucket = Math.floor(this.homeworkSeconds / 30);
+    if (bucket > this.lastPersistedBucket) {
+      this.lastPersistedBucket = bucket;
       this.saveTodayState();
+      this.syncCurrentSession();
     }
   },
 
@@ -884,7 +1071,8 @@ const App = {
         break;
 
       case STATE.COMPLETED:
-        // 庆祝页面处理
+        btnReset.style.display = '';
+        this.setEncouragement('今天的任务已经记录好啦，明天继续加油！');
         break;
     }
   },
@@ -1009,6 +1197,8 @@ const App = {
     document.getElementById('celebration-message').textContent =
       '认真完成作业的小朋友，值得拥有快乐时间！';
 
+    document.querySelector('.reward-section').style.display = happyMinutes > 0 ? '' : 'none';
+
     // 重置快乐时间选择
     document.querySelectorAll('.reward-btn').forEach(btn => btn.classList.remove('selected'));
 
@@ -1063,12 +1253,6 @@ const App = {
     document.querySelector('.reward-section').style.display = '';
     // 恢复 badge 样式
     document.getElementById('celebration-badge').style.background = '';
-
-    // 重置状态
-    this.state = STATE.IDLE;
-    this.homeworkSeconds = 0;
-    this.pausedSeconds = 0;
-    this.startTime = null;
 
     // 显示计时页面
     const page = document.getElementById('page-timer');
@@ -1145,6 +1329,10 @@ const App = {
       records[records.length - 1].rewardChoice = btn.dataset.choice;
       Storage.saveRecords(records);
     }
+    this.syncCurrentSession({
+      playtime_type: btn.dataset.choice,
+      reward_choice: btn.dataset.choice
+    });
   },
 
   // ---------- 状态持久化 ----------
@@ -1159,7 +1347,8 @@ const App = {
       homeworkSeconds: this.homeworkSeconds,
       pausedSeconds: this.pausedSeconds,
       pauseStart: this.pauseStart,
-      frozenRemainingSeconds: this.frozenRemainingSeconds
+      frozenRemainingSeconds: this.frozenRemainingSeconds,
+      savedAt: Date.now()
     };
 
     Storage.saveTodayState(stateData);
@@ -1183,6 +1372,12 @@ const App = {
     this.pausedSeconds = saved.pausedSeconds || 0;
     this.pauseStart = saved.pauseStart || null;
     this.frozenRemainingSeconds = saved.frozenRemainingSeconds || null;
+    this.lastPersistedBucket = Math.floor(this.homeworkSeconds / 30);
+
+    if (this.state === STATE.RUNNING && saved.savedAt) {
+      this.homeworkSeconds += Math.max(0, (Date.now() - saved.savedAt) / 1000);
+      this.lastPersistedBucket = Math.floor(this.homeworkSeconds / 30);
+    }
 
     // 如果之前是暂停状态，恢复暂停时间
     if (this.state === STATE.PAUSED && saved.pauseStart) {
@@ -1379,15 +1574,15 @@ const App = {
       }
 
       card.innerHTML = `
-        <div class="record-date">${record.date} ${statusTag}</div>
+        <div class="record-date">${escapeHtml(record.date)} ${statusTag}</div>
         <div class="record-details">
           <div class="record-detail">
             <span class="label">开始时间</span>
-            <span class="value">${record.startTime || '--'}</span>
+            <span class="value">${escapeHtml(record.startTime || '--')}</span>
           </div>
           <div class="record-detail">
             <span class="label">完成时间</span>
-            <span class="value">${record.finishTime || '--'}</span>
+            <span class="value">${escapeHtml(record.finishTime || '--')}</span>
           </div>
           <div class="record-detail">
             <span class="label">作业用时</span>
@@ -1405,7 +1600,7 @@ const App = {
           ${(record.checklist.attitudeGood ? '✅' : '⬜')} 认真
         </div>` : ''}
         <div class="record-title">
-          ${record.title || ''}${record.rewardChoice ? ' · ' + record.rewardChoice : ''}
+          ${escapeHtml(record.title || '')}${record.rewardChoice ? ' · ' + escapeHtml(record.rewardChoice) : ''}
         </div>
       `;
       list.appendChild(card);

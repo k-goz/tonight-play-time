@@ -1,113 +1,76 @@
-# MacBook8 部署指南
+# 部署指南
 
-## 快速部署（一键脚本）
+当前唯一受支持的运行时是 Node.js 20.17+、Express 和 SQLite。
 
-SSH 到 MacBook8 后执行：
+## Railway
 
-```bash
-# 1. 进入项目目录
-cd /opt/tonight-play-time
+仓库根目录的 `railway.json` 使用：
 
-# 2. 安装依赖
-cd backend && npm install --production
-
-# 3. 启动服务
-node server.js
+```text
+node backend/server.js
 ```
 
-## 生产环境部署（systemd 服务）
+需要挂载持久化 Volume。应用会优先把数据库写入 `RAILWAY_VOLUME_MOUNT_PATH`。部署后验证：
 
 ```bash
-# 1. 创建 systemd 服务文件
-sudo tee /etc/systemd/system/tonight-play-time.service > /dev/null << 'EOF'
+curl -f https://your-domain.example/api/health
+```
+
+## 自有 Linux 主机
+
+建议使用独立的低权限系统用户和 SSH Key：
+
+```bash
+cd /opt/tonight-play-time
+npm install --omit=dev
+npm start
+```
+
+systemd 示例：
+
+```ini
 [Unit]
-Description=Tonight Play Time API
+Description=Tonight Play Time
 After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/tonight-play-time/backend
-ExecStart=/usr/bin/node server.js
+User=tonight-play-time
+WorkingDirectory=/opt/tonight-play-time
+ExecStart=/usr/bin/node backend/server.js
+Environment=NODE_ENV=production
+Environment=PORT=8001
+Environment=DATABASE_PATH=/var/lib/tonight-play-time/app.db
 Restart=always
 RestartSec=5
-Environment=NODE_ENV=production
 
 [Install]
 WantedBy=multi-user.target
-EOF
-
-# 2. 启用并启动服务
-sudo systemctl daemon-reload
-sudo systemctl enable tonight-play-time
-sudo systemctl start tonight-play-time
-
-# 3. 查看状态
-sudo systemctl status tonight-play-time
-
-# 4. 查看日志
-sudo journalctl -u tonight-play-time -f
 ```
 
-## 访问方式
+反向代理必须启用 HTTPS，并且只暴露应用端口，不要额外发布项目目录或数据库目录。
 
-- **本地访问**: http://localhost:8001
-- **Tailscale 访问**: http://100.81.234.57:8001
-- **健康检查**: http://100.81.234.57:8001/api/health
+## 部署脚本
 
-## 功能说明
+`deploy.sh` 不保存密码，使用当前 SSH Agent 或指定的 SSH Key：
 
-### 账号系统
-- **注册**: 用户名 + 昵称 + 密码
-- **登录**: 用户名 + 密码
-- **数据同步**: 登录后数据自动同步到服务器
-- **离线模式**: 可选择跳过登录，使用本地存储
-
-### 数据持久化
-- 用户数据存储在 SQLite 数据库: `/opt/tonight-play-time/backend/tonight_play_time.db`
-- 支持多用户
-- 数据不会因清空浏览器缓存而丢失
-
-### 分享给朋友
-1. 朋友通过 Tailscale 访问 http://100.81.234.57:8001
-2. 注册账号
-3. 开始使用
-
-## 前端访问
-
-### 方式一：通过后端访问（推荐）
-访问 http://100.81.234.57:8001 即可，后端会自动提供前端文件
-
-### 方式二：GitHub Pages
-访问 https://k-goz.github.io/tonight-play-time/
-- 需要手动配置 API 地址
-- 或者使用本地模式（数据只存在浏览器）
-
-## 故障排查
-
-### 服务无法启动
 ```bash
-# 检查端口占用
-sudo ss -tlnp | grep 8001
-
-# 检查日志
-sudo journalctl -u tonight-play-time -n 50
-
-# 重启服务
-sudo systemctl restart tonight-play-time
+DEPLOY_SERVER=user@host ./deploy.sh
 ```
 
-### 数据库问题
+可通过 `DEPLOY_REMOTE_DIR` 修改远端目录。
+
+## 上线前检查
+
 ```bash
-# 删除数据库重新开始（会丢失数据）
-rm /opt/tonight-play-time/backend/tonight_play_time.db
-sudo systemctl restart tonight-play-time
+npm run check
+npm test
+npm audit --omit=dev
 ```
 
-### 网络问题
-```bash
-# 检查 Tailscale 状态
-tailscale status
+还必须确认：
 
-# 检查防火墙
-sudo iptables -L -n | grep 8001
-```
+- 旧版脚本中曾出现过的服务器凭据已经轮换。
+- SQLite 所在目录不可被 Web 服务读取。
+- 已配置定期数据库备份与恢复演练。
+- 健康检查、服务重启和 HTTPS 均正常。

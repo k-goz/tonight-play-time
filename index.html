@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <title>今晚还能玩多久</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=5">
 </head>
 <body>
   <div id="app">
@@ -53,7 +53,7 @@
           </div>
           <div class="form-group">
             <label>密码</label>
-            <input type="password" id="reg-password" class="form-input" placeholder="请设置密码" autocomplete="new-password">
+            <input type="password" id="reg-password" class="form-input" placeholder="至少8位密码" minlength="8" autocomplete="new-password">
           </div>
           <button id="btn-register" class="btn btn-primary btn-large btn-full">注册</button>
           <p class="auth-switch">已有账号？<a href="#" id="show-login">去登录</a></p>
@@ -305,7 +305,7 @@
     </div>
   </div>
 
-  <script src="api-service.js"></script>
-  <script src="app.js"></script>
+  <script src="api-service.js?v=5"></script>
+  <script src="app.js?v=5"></script>
 </body>
 </html>

@@ -107,6 +107,22 @@ const API_SERVICE = {
   },
 
   /**
+   * Revoke the current server token, then always clear local credentials.
+   */
+  async revokeToken() {
+    if (!this.token) {
+      this.logout();
+      return;
+    }
+
+    try {
+      await this.request('/api/auth/logout', { method: 'POST' });
+    } finally {
+      this.logout();
+    }
+  },
+
+  /**
    * Check if logged in
    */
   isLoggedIn() {

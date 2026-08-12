@@ -1,126 +1,87 @@
-# 🌙 今晚还能玩多久
+# 今晚还能玩多久
 
-> 亲子时间管理工具 — 帮助小朋友管理写作业到睡觉前的时间
+亲子作业时间管理 PWA。它把“催孩子写作业”转化为一条由孩子自己掌握的正向反馈闭环：越早认真完成，睡前可自由安排的时间越清晰。
 
-**核心理念：** 不是催孩子写作业，而是让孩子理解——"认真完成作业，就能把睡前快乐时间赢回来。"
+## 当前能力
 
-![纯前端](https://img.shields.io/badge/纯前端-HTML%2FCSS%2FJS-blue)
-![PWA](https://img.shields.io/badge/PWA-支持-9cf)
-![无依赖](https://img.shields.io/badge/外部依赖-无-success)
-![License](https://img.shields.io/badge/license-MIT-green)
+- 北京时间与自定义睡觉时间
+- 作业开始、暂停、继续、完成计时
+- 家长三项确认：作业、订正、态度
+- 完成庆祝、快乐时间项目选择
+- 7 天 / 30 天记录与本周星星图
+- 无账号本地模式：数据保存在 `localStorage`
+- 账号模式：记录同步到 Node.js + SQLite 服务端
+- PWA 安装与静态资源离线缓存
 
----
+## 使用流程
 
-## ✨ 功能亮点
+```text
+登录或本地模式
+  → 开始作业
+  → 计时中（可暂停 / 继续）
+  → 我写完啦
+  → 家长检查确认
+  → 庆祝与快乐时间选择
+```
 
-- 🕐 **北京时间实时显示** — 以 `Asia/Shanghai` 时区为准，不受设备时区影响
-- ⏱️ **作业计时** — 支持开始、暂停、继续，暂停期间不累计作业用时
-- 📊 **可视化进度条** — 左侧作业时间（紫色）/ 右侧快乐时间（绿色），小火箭跟随移动
-- 🔍 **家长确认机制** — 三项勾选（作业完成 / 订正完成 / 态度认真），全通过才能解锁快乐时间
-- 🎉 **庆祝动画** — 撒花、彩带、星星飘落 + 随机称号（专注小火箭、作业小勇士等）
-- 🎁 **快乐时间选择** — 看动画 / 玩玩具 / 听故事 / 亲子游戏 / 自由安排
-- 📈 **数据统计** — 7天/30天记录查看、平均用时统计、一周星星图
-- 🔒 **家长数据保护** — PIN 码验证（默认 1234，可修改）
-- 📱 **PWA 支持** — 可添加到手机桌面，支持离线使用
-- 🎨 **儿童友好设计** — 大按钮、大字体、温暖配色、卡通风格
+应用状态机：`idle → running ⇄ paused → reviewing → completed`。
 
----
+## 技术结构
 
-## 🚀 快速开始
+```text
+index.html / style.css       页面与样式
+app.js                       状态机、计时、渲染、本地持久化与同步触发
+api-service.js               认证与会话 API
+service-worker.js            PWA 静态资源缓存（API 不缓存）
+backend/server.js            Express API、认证、SQLite、静态文件白名单
+backend/data/                本地数据库目录（不进入 Git）
+tests/server.test.js         API 与安全边界回归测试
+```
 
-### 方式一：直接打开
+项目只保留 Node.js 后端。最低要求 Node.js 20.17。
 
-双击 `index.html` 即可在浏览器中使用。
-
-### 方式二：本地服务器（推荐，PWA 功能需要）
+## 本地运行
 
 ```bash
-# 使用 Python
-python3 -m http.server 8080
-
-# 或使用 Node.js
-npx serve .
-
-# 或使用 VS Code Live Server 插件
+npm install
+npm start
 ```
 
-然后访问 `http://localhost:8080`
+默认访问：<http://localhost:8001>
 
----
+如需指定端口或数据库：
 
-## 📁 项目结构
-
-```
-tonight-play-time/
-├── index.html            # 主页面
-├── style.css             # 样式表（移动端优先响应式）
-├── app.js                # 核心逻辑（计时、状态管理、UI）
-├── manifest.json         # PWA 清单
-├── service-worker.js     # 离线缓存 Service Worker
-├── icons/
-│   ├── icon-192.png      # 应用图标 192×192
-│   └── icon-512.png      # 应用图标 512×512
-└── README.md
+```bash
+PORT=8080 DATABASE_PATH=/absolute/path/tonight_play_time.db npm start
 ```
 
----
+不要直接双击 `index.html`：账号 API 和完整 PWA 能力需要通过 Node 服务访问。
 
-## 🎮 使用流程
+## 验证
 
+```bash
+npm run check
+npm test
 ```
-开始作业 → 计时中（可暂停/继续）→ 我写完啦 → 家长检查确认 → 🎉 庆祝！选择快乐时间
-```
 
-### 状态说明
+测试覆盖：
 
-| 状态 | 说明 |
-|------|------|
-| `idle` | 未开始，显示"开始作业"按钮 |
-| `running` | 正在写作业，显示"暂停"和"我写完啦" |
-| `paused` | 暂停中，显示"继续作业"（作业时间不累计） |
-| `reviewing` | 等待家长确认 |
-| `completed` | 已完成，显示庆祝页面 |
+- 前端和后端 JavaScript 语法
+- 静态文件白名单，部署脚本、后端源码和数据库不可下载
+- 注册、登录、会话创建和完成更新
+- 非法会话字段被拒绝
+- Token 在服务重启后仍有效
+- 退出登录后 Token 失效
 
-### 计时规则
+## 数据与安全说明
 
-- **作业用时** = 从开始到完成确认的时间，**扣除暂停时间**
-- **快乐时间** = 距晚上 9:30 的剩余时间，**按真实时间计算**（暂停时也会减少）
-- 超过 9:30 完成仍会鼓励，但快乐时间为 0
+- 密码使用带随机盐的 `scrypt` 保存；旧版 SHA-256 密码在成功登录后自动升级。
+- 登录 Token 的摘要保存在 SQLite，服务重启不会强制退出。
+- 会话更新采用字段白名单。
+- 数据库位于 Web 静态目录之外。
+- 部署只使用 SSH Key，不在仓库中保存密码。
+- 家长 PIN 目前只用于家庭设备上的轻量隔离，不等同于强安全认证。
 
----
+## 部署
 
-## ⚙️ 家长设置
-
-点击右上角 📊 → 输入 PIN 码（默认 `1234`）→ 进入数据页面
-
-可配置项：
-- **睡觉时间** — 默认 21:30，可修改
-- **家长密码** — 4 位数字 PIN
-- **数据导出** — 导出为 JSON 文件
-
----
-
-## 📱 设备适配
-
-| 设备 | 适配情况 |
-|------|----------|
-| 📱 手机（iPhone / Android） | ✅ 全面适配，支持刘海屏安全区域 |
-| 📱 iPad / 平板 | ✅ 大屏优化布局 |
-| 🖥️ 桌面浏览器 | ✅ 最大宽度限制，居中显示 |
-| 📲 添加到桌面 | ✅ PWA 支持（需通过 HTTP 服务器访问） |
-
----
-
-## 🛠️ 技术实现
-
-- **纯前端**：HTML + CSS + JavaScript，零外部依赖
-- **数据存储**：localStorage（无需后端、无需数据库）
-- **时间处理**：`Intl.DateTimeFormat` + `timeZone: "Asia/Shanghai"`
-- **离线支持**：Service Worker 缓存策略（Cache First + Network Fallback）
-- **动画效果**：纯 CSS 动画（confetti、bounceIn、fadeIn 等）
-
----
-
-## 📄 License
-
-MIT License
+参见 [DEPLOY.md](DEPLOY.md)。生产环境必须配置 HTTPS、持久化磁盘、备份和凭据轮换。

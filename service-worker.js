@@ -3,12 +3,13 @@
  * 提供离线缓存支持
  */
 
-const CACHE_NAME = 'homework-timer-v2';
+const CACHE_NAME = 'homework-timer-v5';
 const ASSETS_TO_CACHE = [
   './',
   './index.html',
-  './style.css',
-  './app.js',
+  './style.css?v=5',
+  './app.js?v=5',
+  './api-service.js?v=5',
   './manifest.json',
   './icons/icon-192.png',
   './icons/icon-512.png'
@@ -35,28 +36,30 @@ self.addEventListener('activate', (event) => {
   );
 });
 
-// 请求拦截：缓存优先，网络回退
+// 请求拦截：API 始终走网络；静态资源网络优先、缓存回退。
 self.addEventListener('fetch', (event) => {
+  const url = new URL(event.request.url);
+  if (url.pathname.startsWith('/api/')) {
+    return;
+  }
+
   event.respondWith(
-    caches.match(event.request)
-      .then(cached => {
+    fetch(event.request)
+      .then(response => {
+        if (response.ok && event.request.method === 'GET' &&
+            event.request.url.startsWith(self.location.origin)) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
+        }
+        return response;
+      })
+      .catch(async () => {
+        const cached = await caches.match(event.request);
         if (cached) return cached;
-        return fetch(event.request)
-          .then(response => {
-            // 只缓存同源 GET 请求
-            if (response.ok && event.request.method === 'GET' &&
-                event.request.url.startsWith(self.location.origin)) {
-              const clone = response.clone();
-              caches.open(CACHE_NAME).then(cache => cache.put(event.request, clone));
-            }
-            return response;
-          })
-          .catch(() => {
-            // 离线回退
-            if (event.request.destination === 'document') {
-              return caches.match('./index.html');
-            }
-          });
+        if (event.request.destination === 'document') {
+          return caches.match('./index.html');
+        }
+        return new Response('Offline', { status: 503, statusText: 'Offline' });
       })
   );
 });
