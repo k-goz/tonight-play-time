@@ -174,6 +174,16 @@ const API_SERVICE = {
   },
 
   /**
+   * Archive or restore a child profile without deleting its history.
+   */
+  async setChildArchived(childId, archived) {
+    return await this.request(`/api/children/${childId}/archive`, {
+      method: 'POST',
+      body: JSON.stringify({ archived })
+    });
+  },
+
+  /**
    * Get account-level parent settings. The PIN is never returned.
    */
   async getSettings(childId) {

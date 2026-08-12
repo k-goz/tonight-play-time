@@ -942,21 +942,56 @@ body {
 
 .family-profile-card {
   display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.9rem 1rem;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+  padding: 0.75rem;
   border: 2px solid transparent;
   border-radius: var(--radius-md);
   background: var(--color-card-bg);
   box-shadow: var(--shadow-sm);
   color: inherit;
   font-family: var(--font-family);
-  text-align: left;
-  cursor: pointer;
 }
 
 .family-profile-card.active {
   border-color: var(--color-primary-light);
+}
+
+.family-profile-card.archived {
+  background: rgba(255, 255, 255, 0.48);
+  border-style: dashed;
+}
+
+.profile-select {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.profile-select:disabled {
+  cursor: default;
+  opacity: 0.72;
+}
+
+.profile-archive {
+  align-self: flex-end;
+  padding: 0.3rem 0.6rem;
+  border: 1px solid rgba(124, 92, 252, 0.28);
+  border-radius: 999px;
+  background: rgba(124, 92, 252, 0.08);
+  color: var(--color-primary-dark);
+  font: inherit;
+  font-size: 0.78rem;
+  cursor: pointer;
 }
 
 .profile-avatar {
@@ -964,10 +999,12 @@ body {
 }
 
 .profile-name {
+  display: block;
   font-weight: 700;
 }
 
 .profile-meta {
+  display: block;
   color: var(--color-text-light);
   font-size: 0.78rem;
 }
@@ -981,7 +1018,7 @@ body {
 
 .add-child-grid {
   display: grid;
-  grid-template-columns: 2fr 0.8fr 1.2fr;
+  grid-template-columns: 1.8fr 0.7fr 1.1fr 1.1fr;
   gap: 0.75rem;
 }
 

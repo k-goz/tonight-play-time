@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <title>今晚还能玩多久</title>
-  <link rel="stylesheet" href="style.css?v=7">
+  <link rel="stylesheet" href="style.css?v=8">
 </head>
 <body>
   <div id="app">
@@ -87,7 +87,7 @@
       <div class="time-info">
         <div class="current-time" id="current-time">--:--:--</div>
         <div class="date-display" id="date-display">----年--月--日 星期-</div>
-        <div class="bedtime-info">💤 睡觉时间：晚上 9:30</div>
+        <div class="bedtime-info">💤 今晚睡觉：21:30（工作日）</div>
       </div>
 
       <!-- 进度区域 -->
@@ -291,7 +291,7 @@
         <!-- 家庭成员 -->
         <div id="family-section" class="family-section" style="display:none;">
           <h3>👨‍👩‍👧 家庭成员</h3>
-          <p class="section-tip">每个孩子拥有独立的作业记录和睡觉时间。</p>
+          <p class="section-tip">每个孩子拥有独立记录和作息；归档只隐藏档案，不会删除历史。</p>
           <div id="family-profile-list" class="family-profile-list"></div>
           <div class="add-child-card">
             <div class="add-child-grid">
@@ -311,8 +311,12 @@
                 </select>
               </div>
               <div class="form-group compact">
-                <label for="new-child-bedtime">睡觉时间</label>
+                <label for="new-child-bedtime">工作日睡觉</label>
                 <input type="time" id="new-child-bedtime" class="setting-input" value="21:30">
+              </div>
+              <div class="form-group compact">
+                <label for="new-child-weekend-bedtime">周末睡觉</label>
+                <input type="time" id="new-child-weekend-bedtime" class="setting-input" value="21:30">
               </div>
             </div>
             <button id="btn-add-child" class="btn btn-secondary">＋ 添加孩子</button>
@@ -328,8 +332,12 @@
             <input type="text" id="setting-child-name" class="setting-input" maxlength="30">
           </div>
           <div class="setting-item">
-            <label>睡觉时间</label>
+            <label for="setting-bedtime">工作日睡觉时间</label>
             <input type="time" id="setting-bedtime" class="setting-input">
+          </div>
+          <div class="setting-item">
+            <label for="setting-weekend-bedtime">周末睡觉时间</label>
+            <input type="time" id="setting-weekend-bedtime" class="setting-input">
           </div>
           <div class="setting-item">
             <label>家长密码</label>
@@ -345,8 +353,8 @@
     </div>
   </div>
 
-  <script src="time-utils.js?v=7"></script>
-  <script src="api-service.js?v=7"></script>
-  <script src="app.js?v=7"></script>
+  <script src="time-utils.js?v=8"></script>
+  <script src="api-service.js?v=8"></script>
+  <script src="app.js?v=8"></script>
 </body>
 </html>

@@ -22,6 +22,15 @@ test('bedtime countdown uses the same Beijing day and stops at zero', () => {
   assert.equal(TimeUtils.getSecondsToBedtime('21:30', afterBedtime), 0);
 });
 
+test('family bedtime rules distinguish Beijing weekdays and weekends', () => {
+  const settings = { bedtime: '21:30', weekendBedtime: '22:15' };
+
+  assert.equal(TimeUtils.getBedtimeForDate(settings, '2026-08-14'), '21:30'); // Friday
+  assert.equal(TimeUtils.getBedtimeForDate(settings, '2026-08-15'), '22:15'); // Saturday
+  assert.equal(TimeUtils.getBedtimeForDate(settings, '2026-08-16'), '22:15'); // Sunday
+  assert.equal(TimeUtils.getBedtimeForDate({ bedtime: '21:45' }, '2026-08-15'), '21:45');
+});
+
 test('duration formatting floors fractional seconds consistently', () => {
   assert.equal(TimeUtils.formatDuration(0), '0 分钟');
   assert.equal(TimeUtils.formatDuration(61.9), '1 分钟 1 秒');

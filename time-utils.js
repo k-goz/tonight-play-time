@@ -44,6 +44,21 @@
       return `${parts.hour}:${parts.minute}:${parts.second}`;
     },
 
+    isWeekend(date = this.getBeijingNow()) {
+      const target = typeof date === 'string'
+        ? new Date(`${date}T12:00:00+08:00`)
+        : date;
+      const weekday = this.getParts(target).weekday;
+      return weekday === 'Sat' || weekday === 'Sun';
+    },
+
+    getBedtimeForDate(settings, date = this.getBeijingNow()) {
+      const weekdayBedtime = settings?.bedtime || '21:30';
+      return this.isWeekend(date)
+        ? (settings?.weekendBedtime || weekdayBedtime)
+        : weekdayBedtime;
+    },
+
     getBedtimeDate(bedtimeStr, now = this.getBeijingNow()) {
       const [hour, minute] = bedtimeStr.split(':').map(Number);
       const parts = this.getParts(now);

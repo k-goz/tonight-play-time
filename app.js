@@ -208,15 +208,20 @@ const Storage = {
   /** 获取设置 */
   getSettings() {
     const defaults = this.accountUserId
-      ? { bedtime: '21:30' }
-      : { bedtime: '21:30', parentPin: '1234' };
-    return this.get(STORAGE_KEYS.SETTINGS, defaults);
+      ? { bedtime: '21:30', weekendBedtime: '21:30' }
+      : { bedtime: '21:30', weekendBedtime: '21:30', parentPin: '1234' };
+    const stored = this.get(STORAGE_KEYS.SETTINGS, defaults);
+    return {
+      ...defaults,
+      ...stored,
+      weekendBedtime: stored.weekendBedtime || stored.bedtime || defaults.weekendBedtime
+    };
   },
 
   /** 保存设置 */
   saveSettings(settings) {
     const safeSettings = this.accountUserId
-      ? { bedtime: settings.bedtime }
+      ? { bedtime: settings.bedtime, weekendBedtime: settings.weekendBedtime || settings.bedtime }
       : settings;
     this.set(STORAGE_KEYS.SETTINGS, safeSettings);
   },
@@ -226,7 +231,12 @@ const Storage = {
   },
 
   getLocalSettings() {
-    return this.getRaw(STORAGE_KEYS.SETTINGS, { bedtime: '21:30', parentPin: '1234' });
+    const settings = this.getRaw(STORAGE_KEYS.SETTINGS, {
+      bedtime: '21:30',
+      weekendBedtime: '21:30',
+      parentPin: '1234'
+    });
+    return { ...settings, weekendBedtime: settings.weekendBedtime || settings.bedtime || '21:30' };
   },
 
   getLocalTodayState() {
@@ -358,8 +368,14 @@ const App = {
   },
 
   updateBedtimeDisplay() {
-    const [h, m] = this.settings.bedtime.split(':');
-    document.querySelector('.bedtime-info').textContent = `💤 睡觉时间：晚上 ${h}:${m}`;
+    const bedtime = this.getCurrentBedtime();
+    const [h, m] = bedtime.split(':');
+    const ruleLabel = TimeUtils.isWeekend() ? '周末' : '工作日';
+    document.querySelector('.bedtime-info').textContent = `💤 今晚睡觉：${h}:${m}（${ruleLabel}）`;
+  },
+
+  getCurrentBedtime(date = TimeUtils.getBeijingNow()) {
+    return TimeUtils.getBedtimeForDate(this.settings, date);
   },
 
   // ---------- 事件绑定 ----------
@@ -546,18 +562,23 @@ const App = {
     this.pendingLocalRecords = Storage.getLocalRecords().filter(record => !record.migratedToAccount);
     this.pendingLocalSettings = Storage.getLocalSettings();
     this.children = await API_SERVICE.getChildren();
-    if (this.children.length === 0) throw new Error('账号缺少孩子档案');
+    const activeChildren = this.children.filter(child => !child.archived_at);
+    if (activeChildren.length === 0) throw new Error('账号缺少可用的孩子档案');
 
     const savedChildId = Number(localStorage.getItem(`active_child_user_${this.user.user_id}`));
-    this.activeChild = this.children.find(child => child.id === Number(preferredChildId)) ||
-      this.children.find(child => child.id === savedChildId) ||
-      this.children.find(child => child.is_default) ||
-      this.children[0];
+    this.activeChild = activeChildren.find(child => child.id === Number(preferredChildId)) ||
+      activeChildren.find(child => child.id === savedChildId) ||
+      activeChildren.find(child => child.is_default) ||
+      activeChildren[0];
     Storage.useAccount(this.user.user_id, this.activeChild.id);
     Storage.migrateLegacyAccountScope(this.user.user_id);
 
     if (!Storage.has(STORAGE_KEYS.SETTINGS)) {
-      Storage.saveSettings({ bedtime: this.activeChild.bedtime || this.pendingLocalSettings.bedtime });
+      Storage.saveSettings({
+        bedtime: this.activeChild.bedtime || this.pendingLocalSettings.bedtime,
+        weekendBedtime: this.activeChild.weekend_bedtime ||
+          this.pendingLocalSettings.weekendBedtime || this.pendingLocalSettings.bedtime
+      });
     }
     Storage.moveLocalTodayStateToAccount();
     localStorage.setItem(`active_child_user_${this.user.user_id}`, String(this.activeChild.id));
@@ -604,7 +625,7 @@ const App = {
       return;
     }
 
-    selector.innerHTML = this.children.map(child =>
+    selector.innerHTML = this.children.filter(child => !child.archived_at).map(child =>
       `<option value="${child.id}"${child.id === this.activeChild.id ? ' selected' : ''}>${escapeHtml(child.name)}</option>`
     ).join('');
     avatar.textContent = this.activeChild.avatar || '🌙';
@@ -619,13 +640,16 @@ const App = {
       return;
     }
 
-    const child = this.children.find(item => item.id === childId);
+    const child = this.children.find(item => item.id === childId && !item.archived_at);
     if (!child) return;
     this.activeChild = child;
     Storage.useAccount(this.user.user_id, child.id);
     localStorage.setItem(`active_child_user_${this.user.user_id}`, String(child.id));
     if (!Storage.has(STORAGE_KEYS.SETTINGS)) {
-      Storage.saveSettings({ bedtime: child.bedtime });
+      Storage.saveSettings({
+        bedtime: child.bedtime,
+        weekendBedtime: child.weekend_bedtime || child.bedtime
+      });
     }
     this.renderChildSwitcher();
     const statsOpen = document.getElementById('page-stats').classList.contains('active');
@@ -644,6 +668,7 @@ const App = {
     const nameInput = document.getElementById('new-child-name');
     const avatarInput = document.getElementById('new-child-avatar');
     const bedtimeInput = document.getElementById('new-child-bedtime');
+    const weekendBedtimeInput = document.getElementById('new-child-weekend-bedtime');
     const button = document.getElementById('btn-add-child');
     const message = document.getElementById('child-profile-message');
     const name = nameInput.value.trim();
@@ -658,7 +683,8 @@ const App = {
       const child = await API_SERVICE.createChild({
         name,
         avatar: avatarInput.value,
-        bedtime: bedtimeInput.value
+        bedtime: bedtimeInput.value,
+        weekend_bedtime: weekendBedtimeInput.value
       });
       this.children = await API_SERVICE.getChildren();
       nameInput.value = '';
@@ -683,19 +709,66 @@ const App = {
     }
 
     section.style.display = '';
-    list.innerHTML = this.children.map(child => `
-      <button type="button" class="family-profile-card${child.id === this.activeChild?.id ? ' active' : ''}"
-        data-child-id="${child.id}" aria-pressed="${child.id === this.activeChild?.id}" aria-label="切换到${escapeHtml(child.name)}">
-        <span class="profile-avatar">${escapeHtml(child.avatar || '🌙')}</span>
-        <div>
-          <div class="profile-name">${escapeHtml(child.name)}${child.is_default ? ' · 首个档案' : ''}</div>
-          <div class="profile-meta">睡觉时间 ${escapeHtml(child.bedtime)}</div>
+    list.innerHTML = this.children.map(child => {
+      const archived = Boolean(child.archived_at);
+      const active = child.id === this.activeChild?.id;
+      return `
+        <div class="family-profile-card${active ? ' active' : ''}${archived ? ' archived' : ''}">
+          <button type="button" class="profile-select" data-child-id="${child.id}"
+            ${archived ? 'disabled' : ''} aria-pressed="${active}" aria-label="切换到${escapeHtml(child.name)}">
+            <span class="profile-avatar">${escapeHtml(child.avatar || '🌙')}</span>
+            <span>
+              <span class="profile-name">${escapeHtml(child.name)}${child.is_default ? ' · 默认档案' : ''}</span>
+              <span class="profile-meta">${archived ? '已归档 · 数据保留' : `工作日 ${escapeHtml(child.bedtime)} · 周末 ${escapeHtml(child.weekend_bedtime || child.bedtime)}`}</span>
+            </span>
+          </button>
+          ${child.is_default ? '' : `<button type="button" class="profile-archive" data-archive-child-id="${child.id}" data-archived="${archived}">${archived ? '恢复档案' : '归档档案'}</button>`}
         </div>
-      </button>
-    `).join('');
+      `;
+    }).join('');
     list.querySelectorAll('[data-child-id]').forEach(button => {
       button.addEventListener('click', () => this.switchChild(Number(button.dataset.childId)));
     });
+    list.querySelectorAll('[data-archive-child-id]').forEach(button => {
+      button.addEventListener('click', () => this.setChildArchived(
+        Number(button.dataset.archiveChildId),
+        button.dataset.archived !== 'true'
+      ));
+    });
+  },
+
+  async setChildArchived(childId, archived) {
+    const child = this.children.find(item => item.id === childId);
+    const message = document.getElementById('child-profile-message');
+    if (!child || child.is_default) return;
+    if (archived && child.id === this.activeChild?.id && ![STATE.IDLE, STATE.COMPLETED].includes(this.state)) {
+      message.textContent = '当前孩子正在计时，请先完成或重新开始后再归档。';
+      return;
+    }
+    if (archived && !confirm(`归档“${child.name}”？历史记录会保留，之后可以恢复。`)) return;
+
+    try {
+      await API_SERVICE.setChildArchived(childId, archived);
+      this.children = await API_SERVICE.getChildren();
+      const activeStillAvailable = this.children.find(item =>
+        item.id === this.activeChild?.id && !item.archived_at
+      );
+      if (!activeStillAvailable) {
+        this.activeChild = this.children.find(item => item.is_default && !item.archived_at) ||
+          this.children.find(item => !item.archived_at);
+        Storage.useAccount(this.user.user_id, this.activeChild.id);
+        localStorage.setItem(`active_child_user_${this.user.user_id}`, String(this.activeChild.id));
+        this.loadStorageContext();
+        await this.syncFromServer({ restoreToday: false });
+      }
+      message.textContent = archived ? `已归档 ${child.name}，历史记录仍保留` : `已恢复 ${child.name}`;
+      this.renderChildSwitcher();
+      this.loadSettings();
+      this.renderFamilyProfiles();
+      this.loadStatsData();
+    } catch (error) {
+      message.textContent = error.message;
+    }
   },
 
   addUserInfoToHeader() {
@@ -752,16 +825,29 @@ const App = {
     const remoteSettings = await API_SERVICE.getSettings(this.activeChild.id);
     if (!remoteSettings.initialized) {
       const initialSettings = this.pendingLocalSettings || this.settings;
-      const payload = { bedtime: initialSettings.bedtime };
+      const payload = {
+        bedtime: initialSettings.bedtime,
+        weekend_bedtime: initialSettings.weekendBedtime || initialSettings.bedtime
+      };
       if (!remoteSettings.pin_configured) {
         payload.parent_pin = initialSettings.parentPin || '1234';
       }
       await API_SERVICE.updateSettings(this.activeChild.id, payload);
-      this.settings = { bedtime: initialSettings.bedtime };
+      this.settings = {
+        bedtime: initialSettings.bedtime,
+        weekendBedtime: initialSettings.weekendBedtime || initialSettings.bedtime
+      };
     } else {
-      this.settings = { bedtime: remoteSettings.bedtime };
+      this.settings = {
+        bedtime: remoteSettings.bedtime,
+        weekendBedtime: remoteSettings.weekend_bedtime || remoteSettings.bedtime
+      };
     }
-    this.activeChild = { ...this.activeChild, bedtime: this.settings.bedtime };
+    this.activeChild = {
+      ...this.activeChild,
+      bedtime: this.settings.bedtime,
+      weekend_bedtime: this.settings.weekendBedtime
+    };
     this.children = this.children.map(child =>
       child.id === this.activeChild.id ? this.activeChild : child
     );
@@ -774,7 +860,7 @@ const App = {
     const checklist = record.checklist || {};
     return {
       date: record.date,
-      bedtime: this.settings.bedtime,
+      bedtime: this.getCurrentBedtime(record.date),
       start_time: record.startTime || null,
       end_time: record.finishTime || null,
       homework_seconds: Math.max(0, Number(record.homeworkDurationSeconds) || 0),
@@ -899,7 +985,7 @@ const App = {
       this.sessionPromise = API_SERVICE.createSession(
         this.activeChild.id,
         TimeUtils.getBeijingDateStr(),
-        this.settings.bedtime
+        this.getCurrentBedtime()
       ).then(session => {
         this.currentSessionId = session.id;
         return session.id;
@@ -921,7 +1007,7 @@ const App = {
         homework_minutes: Math.max(0, this.homeworkSeconds / 60),
         paused_seconds: Math.max(0, this.pausedSeconds),
         start_time: this.startTime,
-        bedtime: this.settings.bedtime,
+        bedtime: this.getCurrentBedtime(),
         completed: this.state === STATE.COMPLETED,
         ...extra
       };
@@ -1013,7 +1099,7 @@ const App = {
     this.state = STATE.REVIEWING;
     this.stopTimer();
     this.stopEncouragementRotation();
-    this.frozenRemainingSeconds = TimeUtils.getSecondsToBedtime(this.settings.bedtime);
+    this.frozenRemainingSeconds = TimeUtils.getSecondsToBedtime(this.getCurrentBedtime());
     this.saveTodayState();
     this.updateUI();
     this.showParentConfirm();
@@ -1039,7 +1125,7 @@ const App = {
 
   confirmComplete() {
     const now = TimeUtils.getBeijingNow();
-    const bedtimeStr = this.settings.bedtime;
+    const bedtimeStr = this.getCurrentBedtime(now);
     const remainingSeconds = this.frozenRemainingSeconds !== null 
       ? this.frozenRemainingSeconds 
       : TimeUtils.getSecondsToBedtime(bedtimeStr);
@@ -1087,7 +1173,7 @@ const App = {
   callItADay() {
     SoundUtils.playClick();
     const now = TimeUtils.getBeijingNow();
-    const bedtimeStr = this.settings.bedtime;
+    const bedtimeStr = this.getCurrentBedtime(now);
     const remainingSeconds = this.frozenRemainingSeconds !== null
       ? this.frozenRemainingSeconds
       : TimeUtils.getSecondsToBedtime(bedtimeStr);
@@ -1199,7 +1285,7 @@ const App = {
 
   updateTimerDisplay() {
     const homeworkSec = Math.floor(this.homeworkSeconds);
-    const remainingSec = TimeUtils.getSecondsToBedtime(this.settings.bedtime);
+    const remainingSec = TimeUtils.getSecondsToBedtime(this.getCurrentBedtime());
 
     // 更新卡片
     document.getElementById('homework-time').textContent = TimeUtils.formatDuration(homeworkSec);
@@ -1278,7 +1364,7 @@ const App = {
   resetProgressDisplay() {
     document.getElementById('homework-time').textContent = '0 分钟';
     document.getElementById('happy-time').textContent = TimeUtils.formatDuration(
-      TimeUtils.getSecondsToBedtime(this.settings.bedtime)
+      TimeUtils.getSecondsToBedtime(this.getCurrentBedtime())
     );
     document.getElementById('happy-label').textContent = '还可以拥有';
     document.getElementById('happy-sublabel').textContent = '快乐时间';
@@ -1847,6 +1933,8 @@ const App = {
 
   loadSettings() {
     document.getElementById('setting-bedtime').value = this.settings.bedtime;
+    document.getElementById('setting-weekend-bedtime').value =
+      this.settings.weekendBedtime || this.settings.bedtime;
     document.getElementById('setting-pin').value = '';
     const nameItem = document.getElementById('setting-child-name-item');
     const nameInput = document.getElementById('setting-child-name');
@@ -1856,6 +1944,7 @@ const App = {
 
   async saveSettings() {
     const bedtime = document.getElementById('setting-bedtime').value;
+    const weekendBedtime = document.getElementById('setting-weekend-bedtime').value;
     const pin = document.getElementById('setting-pin').value;
     const childName = document.getElementById('setting-child-name').value.trim();
     const btn = document.getElementById('btn-save-settings');
@@ -1874,6 +1963,7 @@ const App = {
     }
 
     if (bedtime) this.settings.bedtime = bedtime;
+    if (weekendBedtime) this.settings.weekendBedtime = weekendBedtime;
     if (pin && !this.apiReady) this.settings.parentPin = pin;
 
     Storage.saveSettings(this.settings);
@@ -1883,13 +1973,19 @@ const App = {
     btn.textContent = this.apiReady ? '正在同步…' : '✅ 已保存';
     try {
       if (this.apiReady) {
-        const payload = { bedtime: this.settings.bedtime };
+        const payload = {
+          bedtime: this.settings.bedtime,
+          weekend_bedtime: this.settings.weekendBedtime
+        };
         if (pin) payload.parent_pin = pin;
         await API_SERVICE.updateSettings(this.activeChild.id, payload);
-        if (childName !== this.activeChild.name || bedtime !== this.activeChild.bedtime) {
+        if (childName !== this.activeChild.name ||
+            bedtime !== this.activeChild.bedtime ||
+            weekendBedtime !== (this.activeChild.weekend_bedtime || this.activeChild.bedtime)) {
           this.activeChild = await API_SERVICE.updateChild(this.activeChild.id, {
             name: childName,
-            bedtime: this.settings.bedtime
+            bedtime: this.settings.bedtime,
+            weekend_bedtime: this.settings.weekendBedtime
           });
           this.children = this.children.map(child =>
             child.id === this.activeChild.id ? this.activeChild : child

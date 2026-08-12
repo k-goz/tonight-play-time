@@ -48,14 +48,17 @@ function migrateToFamilySchema(resolve, reject) {
       name TEXT NOT NULL,
       avatar TEXT NOT NULL DEFAULT '🌙',
       bedtime TEXT NOT NULL DEFAULT '21:30',
+      weekend_bedtime TEXT NOT NULL DEFAULT '21:30',
       is_default BOOLEAN NOT NULL DEFAULT 0,
+      archived_at DATETIME,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
-    INSERT INTO child_profiles (user_id, name, bedtime, is_default)
-    SELECT users.id, users.nickname, COALESCE(users.bedtime, '21:30'), 1
+    INSERT INTO child_profiles (user_id, name, bedtime, weekend_bedtime, is_default)
+    SELECT users.id, users.nickname, COALESCE(users.bedtime, '21:30'),
+      COALESCE(users.bedtime, '21:30'), 1
     FROM users
     WHERE NOT EXISTS (
       SELECT 1 FROM child_profiles WHERE child_profiles.user_id = users.id
@@ -134,13 +137,37 @@ function migrateToFamilySchema(resolve, reject) {
       ON child_profiles(user_id) WHERE is_default = 1;
     CREATE INDEX IF NOT EXISTS idx_child_profiles_user
       ON child_profiles(user_id);
-    PRAGMA user_version = 2;
+    PRAGMA user_version = 3;
     COMMIT;
   `;
 
   db.exec(migrationSql, (error) => {
     if (!error) return resolve();
     db.run('ROLLBACK', () => reject(error));
+  });
+}
+
+function migrateToRulesSchema(resolve, reject) {
+  db.all('PRAGMA table_info(child_profiles)', (columnError, columns = []) => {
+    if (columnError) return reject(columnError);
+    const names = new Set(columns.map(column => column.name));
+    const statements = [];
+    const addsWeekendBedtime = !names.has('weekend_bedtime');
+    if (addsWeekendBedtime) {
+      statements.push("ALTER TABLE child_profiles ADD COLUMN weekend_bedtime TEXT NOT NULL DEFAULT '21:30'");
+    }
+    if (!names.has('archived_at')) {
+      statements.push('ALTER TABLE child_profiles ADD COLUMN archived_at DATETIME');
+    }
+    statements.push(`UPDATE child_profiles
+      SET weekend_bedtime = bedtime
+      ${addsWeekendBedtime ? '' : "WHERE weekend_bedtime IS NULL OR weekend_bedtime = ''"}`);
+    statements.push('PRAGMA user_version = 3');
+
+    db.exec(`BEGIN IMMEDIATE; ${statements.join('; ')}; COMMIT;`, (error) => {
+      if (!error) return resolve();
+      db.run('ROLLBACK', () => reject(error));
+    });
   });
 }
 
@@ -213,6 +240,7 @@ const databaseReady = new Promise((resolve, reject) => {
     db.get('PRAGMA user_version', (error, row) => {
       if (error) return reject(error);
       if ((row?.user_version || 0) < 2) return migrateToFamilySchema(resolve, reject);
+      if ((row?.user_version || 0) < 3) return migrateToRulesSchema(resolve, reject);
 
       db.exec(`
         CREATE TABLE IF NOT EXISTS child_profiles (
@@ -221,7 +249,9 @@ const databaseReady = new Promise((resolve, reject) => {
           name TEXT NOT NULL,
           avatar TEXT NOT NULL DEFAULT '🌙',
           bedtime TEXT NOT NULL DEFAULT '21:30',
+          weekend_bedtime TEXT NOT NULL DEFAULT '21:30',
           is_default BOOLEAN NOT NULL DEFAULT 0,
+          archived_at DATETIME,
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -340,7 +370,7 @@ function resolveOwnedChild(userId, rawChildId, callback) {
     const childId = parsePositiveId(rawChildId);
     if (!childId) return callback({ status: 400, detail: '孩子档案编号不正确' });
     return db.get(
-      'SELECT * FROM child_profiles WHERE id = ? AND user_id = ?',
+      'SELECT * FROM child_profiles WHERE id = ? AND user_id = ? AND archived_at IS NULL',
       [childId, userId],
       (error, child) => {
         if (error) return callback({ status: 500, detail: '孩子档案读取失败' });
@@ -351,7 +381,9 @@ function resolveOwnedChild(userId, rawChildId, callback) {
   }
 
   db.get(
-    'SELECT * FROM child_profiles WHERE user_id = ? ORDER BY is_default DESC, id ASC LIMIT 1',
+    `SELECT * FROM child_profiles
+     WHERE user_id = ? AND archived_at IS NULL
+     ORDER BY is_default DESC, id ASC LIMIT 1`,
     [userId],
     (error, child) => {
       if (error) return callback({ status: 500, detail: '孩子档案读取失败' });
@@ -361,9 +393,10 @@ function resolveOwnedChild(userId, rawChildId, callback) {
         if (userError) return callback({ status: 500, detail: '孩子档案读取失败' });
         if (!user) return callback({ status: 404, detail: '用户不存在' });
         db.run(
-          `INSERT INTO child_profiles (user_id, name, avatar, bedtime, is_default)
-           VALUES (?, ?, '🌙', ?, 1)`,
-          [userId, user.nickname, user.bedtime || '21:30'],
+          `INSERT INTO child_profiles (
+            user_id, name, avatar, bedtime, weekend_bedtime, is_default
+           ) VALUES (?, ?, '🌙', ?, ?, 1)`,
+          [userId, user.nickname, user.bedtime || '21:30', user.bedtime || '21:30'],
           function onInsert(insertError) {
             if (insertError) return callback({ status: 500, detail: '孩子档案创建失败' });
             db.get('SELECT * FROM child_profiles WHERE id = ?', [this.lastID], (readError, created) => {
@@ -413,8 +446,9 @@ app.post('/api/auth/register', (req, res) => {
 
         const userId = this.lastID;
         db.run(
-          `INSERT INTO child_profiles (user_id, name, avatar, bedtime, is_default)
-           VALUES (?, ?, '🌙', '21:30', 1)`,
+          `INSERT INTO child_profiles (
+            user_id, name, avatar, bedtime, weekend_bedtime, is_default
+           ) VALUES (?, ?, '🌙', '21:30', '21:30', 1)`,
           [userId, nickname],
           function onChildInsert(childError) {
             if (childError) {
@@ -476,9 +510,10 @@ app.get('/api/auth/me', auth, (req, res) => {
 
 app.get('/api/children', auth, (req, res) => {
   db.all(
-    `SELECT id, name, avatar, bedtime, is_default, created_at, updated_at
+    `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
+       created_at, updated_at
      FROM child_profiles WHERE user_id = ?
-     ORDER BY is_default DESC, id ASC`,
+     ORDER BY archived_at IS NOT NULL, is_default DESC, id ASC`,
     [req.userId],
     (error, children) => {
       if (error) return res.status(500).json({ detail: '孩子档案读取失败' });
@@ -491,22 +526,29 @@ app.post('/api/children', auth, (req, res) => {
   const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const avatar = typeof req.body.avatar === 'string' ? req.body.avatar.trim() : '🌟';
   const bedtime = req.body.bedtime || '21:30';
+  const weekendBedtime = req.body.weekend_bedtime || bedtime;
   if (!validNickname(name)) return res.status(400).json({ detail: '孩子昵称需为1-30个字符' });
   if (!validAvatar(avatar)) return res.status(400).json({ detail: '头像格式不正确' });
   if (!validBedtime(bedtime)) return res.status(400).json({ detail: '睡觉时间格式不正确' });
+  if (!validBedtime(weekendBedtime)) return res.status(400).json({ detail: '周末睡觉时间格式不正确' });
 
-  db.get('SELECT COUNT(*) AS count FROM child_profiles WHERE user_id = ?', [req.userId], (countError, row) => {
+  db.get(
+    'SELECT COUNT(*) AS count FROM child_profiles WHERE user_id = ? AND archived_at IS NULL',
+    [req.userId],
+    (countError, row) => {
     if (countError) return res.status(500).json({ detail: '孩子档案创建失败' });
     if (row.count >= 6) return res.status(400).json({ detail: '每个家庭最多创建6个孩子档案' });
 
     db.run(
-      `INSERT INTO child_profiles (user_id, name, avatar, bedtime, is_default)
-       VALUES (?, ?, ?, ?, 0)`,
-      [req.userId, name, avatar, bedtime],
+      `INSERT INTO child_profiles (
+        user_id, name, avatar, bedtime, weekend_bedtime, is_default
+       ) VALUES (?, ?, ?, ?, ?, 0)`,
+      [req.userId, name, avatar, bedtime, weekendBedtime],
       function onInsert(error) {
         if (error) return res.status(500).json({ detail: '孩子档案创建失败' });
         db.get(
-          `SELECT id, name, avatar, bedtime, is_default, created_at, updated_at
+          `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
+             created_at, updated_at
            FROM child_profiles WHERE id = ? AND user_id = ?`,
           [this.lastID, req.userId],
           (readError, child) => {
@@ -522,7 +564,7 @@ app.post('/api/children', auth, (req, res) => {
 app.put('/api/children/:id', auth, (req, res) => {
   const childId = parsePositiveId(req.params.id);
   if (!childId) return res.status(400).json({ detail: '孩子档案编号不正确' });
-  const allowed = new Set(['name', 'avatar', 'bedtime']);
+  const allowed = new Set(['name', 'avatar', 'bedtime', 'weekend_bedtime']);
   const keys = Object.keys(req.body || {});
   if (keys.length === 0 || keys.some(key => !allowed.has(key))) {
     return res.status(400).json({ detail: '孩子档案字段不正确' });
@@ -547,22 +589,86 @@ app.put('/api/children/:id', auth, (req, res) => {
     assignments.push('bedtime = ?');
     values.push(req.body.bedtime);
   }
+  if (req.body.weekend_bedtime !== undefined) {
+    if (!validBedtime(req.body.weekend_bedtime)) {
+      return res.status(400).json({ detail: '周末睡觉时间格式不正确' });
+    }
+    assignments.push('weekend_bedtime = ?');
+    values.push(req.body.weekend_bedtime);
+  }
 
   assignments.push('updated_at = CURRENT_TIMESTAMP');
   values.push(childId, req.userId);
   db.run(
-    `UPDATE child_profiles SET ${assignments.join(', ')} WHERE id = ? AND user_id = ?`,
+    `UPDATE child_profiles SET ${assignments.join(', ')}
+     WHERE id = ? AND user_id = ? AND archived_at IS NULL`,
     values,
     function onUpdate(error) {
       if (error) return res.status(500).json({ detail: '孩子档案保存失败' });
       if (this.changes === 0) return res.status(404).json({ detail: '孩子档案不存在' });
       db.get(
-        `SELECT id, name, avatar, bedtime, is_default, created_at, updated_at
+        `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
+           created_at, updated_at
          FROM child_profiles WHERE id = ? AND user_id = ?`,
         [childId, req.userId],
         (readError, child) => {
           if (readError) return res.status(500).json({ detail: '孩子档案读取失败' });
           res.json(child);
+        }
+      );
+    }
+  );
+});
+
+app.post('/api/children/:id/archive', auth, (req, res) => {
+  const childId = parsePositiveId(req.params.id);
+  const archived = req.body.archived;
+  if (!childId) return res.status(400).json({ detail: '孩子档案编号不正确' });
+  if (typeof archived !== 'boolean') return res.status(400).json({ detail: '归档状态必须是布尔值' });
+
+  db.get(
+    'SELECT * FROM child_profiles WHERE id = ? AND user_id = ?',
+    [childId, req.userId],
+    (readError, child) => {
+      if (readError) return res.status(500).json({ detail: '孩子档案读取失败' });
+      if (!child) return res.status(404).json({ detail: '孩子档案不存在' });
+      if (archived && child.is_default) {
+        return res.status(400).json({ detail: '首个孩子档案不能归档' });
+      }
+      if (archived === Boolean(child.archived_at)) return res.json(child);
+
+      const updateArchiveState = () => {
+        db.run(
+          `UPDATE child_profiles
+           SET archived_at = ${archived ? 'CURRENT_TIMESTAMP' : 'NULL'}, updated_at = CURRENT_TIMESTAMP
+           WHERE id = ? AND user_id = ?`,
+          [childId, req.userId],
+          function onUpdate(updateError) {
+            if (updateError) return res.status(500).json({ detail: archived ? '档案归档失败' : '档案恢复失败' });
+            if (this.changes === 0) return res.status(404).json({ detail: '孩子档案不存在' });
+            db.get(
+              `SELECT id, name, avatar, bedtime, weekend_bedtime, is_default, archived_at,
+                 created_at, updated_at
+               FROM child_profiles WHERE id = ? AND user_id = ?`,
+              [childId, req.userId],
+              (updatedError, updated) => {
+                if (updatedError) return res.status(500).json({ detail: '孩子档案读取失败' });
+                res.json(updated);
+              }
+            );
+          }
+        );
+      };
+
+      if (archived) return updateArchiveState();
+      db.get(
+        `SELECT COUNT(*) AS count FROM child_profiles
+         WHERE user_id = ? AND archived_at IS NULL`,
+        [req.userId],
+        (countError, row) => {
+          if (countError) return res.status(500).json({ detail: '档案恢复失败' });
+          if (row.count >= 6) return res.status(400).json({ detail: '当前已有6个孩子档案，无法恢复' });
+          updateArchiveState();
         }
       );
     }
@@ -583,6 +689,7 @@ app.get('/api/settings', auth, (req, res) => {
         res.json({
           child_id: child.id,
           bedtime: child.bedtime,
+          weekend_bedtime: child.weekend_bedtime || child.bedtime,
           initialized: Boolean(user.settings_initialized || user.bedtime),
           pin_configured: Boolean(
             user.parent_pin_hash || (user.pin_code && user.pin_code !== '1234')
@@ -594,43 +701,71 @@ app.get('/api/settings', auth, (req, res) => {
 });
 
 app.put('/api/settings', auth, (req, res) => {
-  const updates = [];
-  const values = [];
+  const userUpdates = [];
+  const userValues = [];
+  const childUpdates = [];
+  const childValues = [];
 
   if (req.body.bedtime !== undefined) {
     if (!validBedtime(req.body.bedtime)) {
       return res.status(400).json({ detail: '睡觉时间格式不正确' });
     }
-    updates.push('bedtime = ?', 'settings_initialized = 1');
-    values.push(req.body.bedtime);
+    userUpdates.push('bedtime = ?');
+    userValues.push(req.body.bedtime);
+    childUpdates.push('bedtime = ?');
+    childValues.push(req.body.bedtime);
+  }
+
+  if (req.body.weekend_bedtime !== undefined) {
+    if (!validBedtime(req.body.weekend_bedtime)) {
+      return res.status(400).json({ detail: '周末睡觉时间格式不正确' });
+    }
+    childUpdates.push('weekend_bedtime = ?');
+    childValues.push(req.body.weekend_bedtime);
   }
 
   if (req.body.parent_pin !== undefined) {
     if (!validPin(req.body.parent_pin)) {
       return res.status(400).json({ detail: '家长密码必须是4位数字' });
     }
-    updates.push('parent_pin_hash = ?', 'pin_code = NULL');
-    values.push(hashPassword(req.body.parent_pin));
+    userUpdates.push('parent_pin_hash = ?', 'pin_code = NULL');
+    userValues.push(hashPassword(req.body.parent_pin));
   }
 
-  if (updates.length === 0) return res.status(400).json({ detail: '没有可保存的设置' });
+  if (childUpdates.length > 0) userUpdates.push('settings_initialized = 1');
+  if (userUpdates.length === 0) return res.status(400).json({ detail: '没有可保存的设置' });
 
   resolveOwnedChild(req.userId, req.body.child_id, (childError, child) => {
     if (childError) return childErrorResponse(res, childError);
-    values.push(req.userId);
-    db.run(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`, values, function onUpdate(error) {
+    userValues.push(req.userId);
+    db.run(`UPDATE users SET ${userUpdates.join(', ')} WHERE id = ?`, userValues, function onUpdate(error) {
       if (error) return res.status(500).json({ detail: '设置保存失败' });
       if (this.changes === 0) return res.status(404).json({ detail: '用户不存在' });
-      if (req.body.bedtime === undefined) {
-        return res.json({ child_id: child.id, bedtime: child.bedtime, saved: true });
-      }
 
+      const respondWithSavedSettings = () => db.get(
+        'SELECT id, bedtime, weekend_bedtime FROM child_profiles WHERE id = ? AND user_id = ?',
+        [child.id, req.userId],
+        (readError, savedChild) => {
+          if (readError) return res.status(500).json({ detail: '孩子睡觉时间读取失败' });
+          res.json({
+            child_id: savedChild.id,
+            bedtime: savedChild.bedtime,
+            weekend_bedtime: savedChild.weekend_bedtime || savedChild.bedtime,
+            saved: true
+          });
+        }
+      );
+
+      if (childUpdates.length === 0) return respondWithSavedSettings();
+      childUpdates.push('updated_at = CURRENT_TIMESTAMP');
+      childValues.push(child.id, req.userId);
       db.run(
-        'UPDATE child_profiles SET bedtime = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND user_id = ?',
-        [req.body.bedtime, child.id, req.userId],
+        `UPDATE child_profiles SET ${childUpdates.join(', ')}
+         WHERE id = ? AND user_id = ? AND archived_at IS NULL`,
+        childValues,
         (childUpdateError) => {
           if (childUpdateError) return res.status(500).json({ detail: '孩子睡觉时间保存失败' });
-          res.json({ child_id: child.id, bedtime: req.body.bedtime, saved: true });
+          respondWithSavedSettings();
         }
       );
     });

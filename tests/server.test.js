@@ -88,12 +88,13 @@ test('authenticated session lifecycle persists and rejects unapproved fields', a
   const savedSettings = await api('/api/settings', {
     method: 'PUT',
     headers,
-    body: JSON.stringify({ bedtime: '22:00', parent_pin: '4321' })
+    body: JSON.stringify({ bedtime: '22:00', weekend_bedtime: '22:30', parent_pin: '4321' })
   });
   assert.equal(savedSettings.response.status, 200);
 
   const updatedSettings = await api('/api/settings', { headers });
   assert.equal(updatedSettings.body.bedtime, '22:00');
+  assert.equal(updatedSettings.body.weekend_bedtime, '22:30');
   assert.equal(updatedSettings.body.initialized, true);
 
   const oldPin = await api('/api/settings/verify-pin', {
@@ -296,7 +297,7 @@ test('local record import is idempotent and never overwrites completed server da
   assert.deepEqual(isolatedSessions.body, []);
 });
 
-test('child profiles isolate same-day sessions and per-child bedtime', async () => {
+test('child profiles isolate sessions, keep separate rules, and archive without data loss', async () => {
   const login = await api('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -314,10 +315,16 @@ test('child profiles isolate same-day sessions and per-child bedtime', async () 
   const secondChildResponse = await api('/api/children', {
     method: 'POST',
     headers,
-    body: JSON.stringify({ name: '小太阳', avatar: '☀️', bedtime: '20:45' })
+    body: JSON.stringify({
+      name: '小太阳',
+      avatar: '☀️',
+      bedtime: '20:45',
+      weekend_bedtime: '21:15'
+    })
   });
   assert.equal(secondChildResponse.response.status, 201);
   const secondChild = secondChildResponse.body;
+  assert.equal(secondChild.weekend_bedtime, '21:15');
 
   const firstSameDay = await api('/api/sessions', {
     method: 'POST',
@@ -341,13 +348,19 @@ test('child profiles isolate same-day sessions and per-child bedtime', async () 
   const updatedSettings = await api('/api/settings', {
     method: 'PUT',
     headers,
-    body: JSON.stringify({ child_id: secondChild.id, bedtime: '20:30' })
+    body: JSON.stringify({
+      child_id: secondChild.id,
+      bedtime: '20:30',
+      weekend_bedtime: '21:30'
+    })
   });
   assert.equal(updatedSettings.response.status, 200);
   const secondSettings = await api(`/api/settings?child_id=${secondChild.id}`, { headers });
   const firstSettings = await api(`/api/settings?child_id=${firstChild.id}`, { headers });
   assert.equal(secondSettings.body.bedtime, '20:30');
+  assert.equal(secondSettings.body.weekend_bedtime, '21:30');
   assert.equal(firstSettings.body.bedtime, '22:00');
+  assert.equal(firstSettings.body.weekend_bedtime, '22:30');
 
   const otherLogin = await api('/api/auth/login', {
     method: 'POST',
@@ -367,6 +380,50 @@ test('child profiles isolate same-day sessions and per-child bedtime', async () 
     body: JSON.stringify({ name: '不应成功' })
   });
   assert.equal(forbiddenChildUpdate.response.status, 404);
+
+  const forbiddenArchive = await api(`/api/children/${secondChild.id}/archive`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${otherLogin.body.access_token}`
+    },
+    body: JSON.stringify({ archived: true })
+  });
+  assert.equal(forbiddenArchive.response.status, 404);
+
+  const defaultArchive = await api(`/api/children/${firstChild.id}/archive`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ archived: true })
+  });
+  assert.equal(defaultArchive.response.status, 400);
+
+  const archivedSecond = await api(`/api/children/${secondChild.id}/archive`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ archived: true })
+  });
+  assert.equal(archivedSecond.response.status, 200);
+  assert.ok(archivedSecond.body.archived_at);
+
+  const archivedSettings = await api(`/api/settings?child_id=${secondChild.id}`, { headers });
+  const archivedSessions = await api(`/api/sessions?child_id=${secondChild.id}`, { headers });
+  assert.equal(archivedSettings.response.status, 404);
+  assert.equal(archivedSessions.response.status, 404);
+
+  const childrenWithArchive = await api('/api/children', { headers });
+  assert.equal(childrenWithArchive.body.at(-1).id, secondChild.id);
+  assert.ok(childrenWithArchive.body.at(-1).archived_at);
+
+  const restoredSecond = await api(`/api/children/${secondChild.id}/archive`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ archived: false })
+  });
+  assert.equal(restoredSecond.response.status, 200);
+  assert.equal(restoredSecond.body.archived_at, null);
+  const restoredSessions = await api(`/api/sessions?child_id=${secondChild.id}&limit=100`, { headers });
+  assert.equal(restoredSessions.body.some(session => session.id === secondSameDay.body.id), true);
 
   const deletedSecond = await api(`/api/sessions?child_id=${secondChild.id}`, {
     method: 'DELETE',
