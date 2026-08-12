@@ -1,14 +1,16 @@
 const express = require('express');
-const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const { createPostgresDatabase } = require('./postgres-db');
+const { POSTGRES_SCHEMA_VERSION, initializePostgresSchema } = require('./postgres-schema');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 8001;
 const APP_ROOT = path.resolve(__dirname, '..');
 
 app.disable('x-powered-by');
+if (process.env.VERCEL) app.set('trust proxy', 1);
 app.use(express.json({ limit: '32kb' }));
 app.use((req, res, next) => {
   res.set({
@@ -22,13 +24,23 @@ app.use((req, res, next) => {
 
 // Keep user data outside the web root. Railway volumes and explicit DATABASE_PATH
 // take precedence; local development defaults to backend/data/.
-const dbPath = process.env.RAILWAY_VOLUME_MOUNT_PATH
-  ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'tonight_play_time.db')
-  : path.resolve(process.env.DATABASE_PATH || path.join(__dirname, 'data', 'tonight_play_time.db'));
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+const postgresUrl = process.env.POSTGRES_URL || process.env.DATABASE_URL;
+const databaseDialect = postgresUrl ? 'postgres' : 'sqlite';
+let dbPath = null;
+let db;
 
-const db = new sqlite3.Database(dbPath);
-db.configure('busyTimeout', 5000);
+if (databaseDialect === 'postgres') {
+  db = createPostgresDatabase(postgresUrl);
+} else {
+  const sqlite3 = require('sqlite3').verbose();
+  dbPath = process.env.RAILWAY_VOLUME_MOUNT_PATH
+    ? path.join(process.env.RAILWAY_VOLUME_MOUNT_PATH, 'tonight_play_time.db')
+    : path.resolve(process.env.DATABASE_PATH || path.join(__dirname, 'data', 'tonight_play_time.db'));
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  db = new sqlite3.Database(dbPath);
+  db.dialect = 'sqlite';
+  db.configure('busyTimeout', 5000);
+}
 
 function addColumn(table, column, definition) {
   db.run(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`, (error) => {
@@ -358,7 +370,7 @@ function migrateToParentAccessSchema(resolve, reject) {
   });
 }
 
-const databaseReady = new Promise((resolve, reject) => {
+const sqliteDatabaseReady = () => new Promise((resolve, reject) => {
   db.serialize(() => {
     db.run('PRAGMA foreign_keys = ON');
     db.run(`CREATE TABLE IF NOT EXISTS users (
@@ -467,6 +479,10 @@ const databaseReady = new Promise((resolve, reject) => {
     });
   });
 });
+
+const databaseReady = databaseDialect === 'postgres'
+  ? initializePostgresSchema(db)
+  : sqliteDatabaseReady();
 
 app.use((req, res, next) => {
   databaseReady.then(() => next()).catch((error) => {
@@ -1963,10 +1979,30 @@ app.get('/api/audit-logs', auth, parentAuth, (req, res) => {
 });
 
 app.get('/api/operations/status', auth, parentAuth, (req, res) => {
-  const backupDir = path.join(path.dirname(dbPath), 'backups');
-  const backups = fs.existsSync(backupDir)
+  const backupDir = dbPath ? path.join(path.dirname(dbPath), 'backups') : null;
+  const backups = backupDir && fs.existsSync(backupDir)
     ? fs.readdirSync(backupDir).filter(name => name.endsWith('.db')).sort().reverse().slice(0, 5)
     : [];
+  if (databaseDialect === 'postgres') {
+    return db.get(
+      `SELECT COUNT(*) AS count FROM sync_conflicts
+       WHERE user_id = ? AND status = 'pending'`,
+      [req.userId],
+      (conflictError, conflicts) => {
+        if (conflictError) return res.status(500).json({ detail: '运行状态读取失败' });
+        res.json({
+          service: 'tonight-play-time',
+          schema_version: POSTGRES_SCHEMA_VERSION,
+          database_dialect: 'postgres',
+          database_integrity: 'managed',
+          pending_conflicts: conflicts?.count || 0,
+          backup_count: null,
+          latest_backup: null,
+          uptime_seconds: Math.floor(process.uptime())
+        });
+      }
+    );
+  }
   db.get('PRAGMA user_version', (versionError, version) => {
     if (versionError) return res.status(500).json({ detail: '运行状态读取失败' });
     db.get('PRAGMA integrity_check', (integrityError, integrity) => {
@@ -1997,7 +2033,9 @@ app.get('/api/health', (req, res) => {
     res.status(error ? 503 : 200).json({
       status: error ? 'degraded' : 'ok',
       service: 'tonight-play-time',
-      database: error ? 'unavailable' : 'ok'
+      database: error ? 'unavailable' : 'ok',
+      database_dialect: databaseDialect,
+      schema_version: databaseDialect === 'postgres' ? POSTGRES_SCHEMA_VERSION : 5
     });
   });
 });

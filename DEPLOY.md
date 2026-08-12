@@ -1,8 +1,39 @@
 # 部署指南
 
-当前唯一受支持的运行时是 Node.js 20.17+、Express 和 SQLite。
+生产运行时是 Node.js 24 LTS、Express、Vercel Functions 和托管 PostgreSQL；本地及
+Railway 持久卷继续支持 SQLite。
 
-## Railway
+## Vercel + Neon（生产推荐）
+
+仓库包含 `api/index.js` 和 `vercel.json`：静态 PWA 由 Vercel CDN 提供，
+`/api/*` 同源改写到 Express Function。数据库连接来自 Vercel Marketplace Neon，
+生产、预览和开发环境均通过加密环境变量注入，仓库不保存连接串。
+
+```bash
+vercel link --yes --project tonight-play-time --scope k-gozs-projects
+vercel env pull .env.local --environment=development --yes
+npm run quality:cloud
+vercel deploy
+```
+
+预览通过后推送 `main`，Git 集成会自动生产发布。生产验收：
+
+```bash
+curl -f https://tonight-play-time.vercel.app/api/health
+vercel inspect https://tonight-play-time.vercel.app
+```
+
+旧 SQLite 数据迁移：
+
+```bash
+npm run db:migrate:postgres -- /absolute/path/tonight_play_time.db --confirm
+npm run db:verify:postgres
+```
+
+迁移脚本可接受 V1-V5 SQLite；旧版本先原地升级到 V5，再在单个 PostgreSQL
+事务中导入，已存在的主键或唯一键不会被覆盖。
+
+## Railway + SQLite（兼容）
 
 仓库根目录的 `railway.json` 使用：
 
@@ -16,7 +47,7 @@ node backend/server.js
 curl -f https://your-domain.example/api/health
 ```
 
-## 自有 Linux 主机
+## 自有 Linux 主机 + SQLite（兼容）
 
 建议使用独立的低权限系统用户和 SSH Key：
 

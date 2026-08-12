@@ -59,3 +59,12 @@ V1 边界：浏览器必须处于运行状态才能本地调度；完全关闭�
 2. 先补齐 iOS / Android PWA 实机矩阵和自动备份定时任务。
 3. 根据提醒触达率、7 日留存与 ¥19/月意向决定是否接 Web Push 和支付。
 4. 只有付费意向成立后，再进入正式订阅、运营后台和多租户扩展。
+
+## M11：生产级全栈云端化 — 开发完成，发布验收中
+
+- Express API 通过 Vercel Function 与静态 PWA 同源部署
+- Neon PostgreSQL 新加坡区连接池与加密环境变量
+- SQLite V1-V5 自动升级、PostgreSQL V6 幂等 Schema 和迁移工具
+- PostgreSQL 完整家庭生命周期、跨账号隔离和持久化端到端测试
+- PostgreSQL 一致性备份、空库恢复、Schema/外键索引检查
+- Vercel 安全响应头、API 禁止缓存和显式生产回滚脚本

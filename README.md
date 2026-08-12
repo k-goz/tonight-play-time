@@ -15,7 +15,7 @@
 - 家长数据页可新增孩子、修改昵称、调整当前孩子规则，并安全归档 / 恢复非默认档案
 - 孩子完成作业时必须经过一次家长 PIN 确认；该确认不能用于进入管理页面
 - 家长模式由服务端签发 15 分钟短时授权，支持主动锁定和刷新恢复
-- 账号模式：家庭档案、记录、睡觉时间和家长设置同步到 Node.js + SQLite 服务端
+- 账号模式：家庭档案、记录、睡觉时间和家长设置同步到 Node.js 服务端
 - 首次进入家长模式时迁移旧本地记录；重复执行不会产生重复数据
 - 旧单孩子数据库记录会自动归入默认孩子档案；旧睡觉时间同时继承为工作日和周末规则
 - 账号数据按“账号 + 孩子”隔离缓存，切换账号或孩子不会串用记录
@@ -49,13 +49,16 @@ app.js                       状态机、计时、渲染、本地持久化与同
 time-utils.js                北京时间、睡觉时间与时长计算
 api-service.js               认证、会话、设置与迁移 API
 service-worker.js            PWA 静态资源缓存（API 不缓存）
-backend/server.js            Express API、认证、SQLite、静态文件白名单
-scripts/                     SQLite 备份、恢复和生产完整性检查
+api/index.js                 Vercel Function 入口
+backend/server.js            Express API、认证、双数据库运行时与静态文件白名单
+backend/postgres-*.js        PostgreSQL 连接池、幂等 V6 Schema 与迁移
+scripts/                     SQLite/PostgreSQL 迁移、备份、恢复和完整性检查
 backend/data/                本地数据库目录（不进入 Git）
 tests/                       API、安全边界与时间计算回归测试
 ```
 
-项目只保留 Node.js 后端。最低要求 Node.js 20.17。
+项目只保留 Node.js 后端，生产与本地统一使用 Node.js 24 LTS。本地默认 SQLite，检测到
+`POSTGRES_URL` 或 `DATABASE_URL` 时自动启用 PostgreSQL。
 
 ## 本地运行
 
@@ -80,6 +83,7 @@ PORT=8080 DATABASE_PATH=/absolute/path/tonight_play_time.db npm start
 npm run check
 npm test
 npm run quality
+npm run quality:cloud  # 需要已拉取的 Vercel/Neon .env.local
 ```
 
 测试覆盖：
@@ -109,13 +113,15 @@ npm run quality
 - 会话唯一键为“账号 + 孩子 + 日期”，孩子档案访问始终校验所属账号。
 - 归档只让档案退出日常切换与读写入口，不删除档案或历史会话；默认档案不能归档。
 - 旧本地记录迁移规则：云端无记录则导入；云端未完成则由本地完成记录补齐；云端已完成则保持云端版本。
-- 数据库升级到 V5 时会保留历史记录并新增提醒、成长、冲突、审计和产品验证结构；升级前仍应备份 SQLite。
+- SQLite 数据库升级到 V5 时会保留历史记录；云端 PostgreSQL 使用幂等 V6 Schema。
+- `db:migrate:postgres` 会先把 V1-V4 SQLite 自动升级到 V5，再按外键顺序迁移至 PostgreSQL。
 - 数据库位于 Web 静态目录之外。
 - 部署只使用 SSH Key，不在仓库中保存密码。
 - 家长 PIN 是家长数据页的轻量隔离层，不替代账号密码、HTTPS 或设备访问控制。
 
 ## 部署
 
-参见 [DEPLOY.md](DEPLOY.md) 和 [OPERATIONS.md](OPERATIONS.md)。生产环境必须配置 HTTPS、持久化磁盘、定时备份和凭据轮换。
+Vercel + Neon 是正式云端运行方式；SQLite + Railway/自有主机继续作为兼容部署方式。
+参见 [DEPLOY.md](DEPLOY.md) 和 [OPERATIONS.md](OPERATIONS.md)。
 
 后续阶段、验收边界和推荐实施顺序参见 [ROADMAP.md](ROADMAP.md)。

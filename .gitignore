@@ -1,5 +1,10 @@
 node_modules/
+dist/
 *.db
 backend/data/
+backend/backups/
 .env
 .DS_Store
+.vercel
+.env*
+!.env.example
