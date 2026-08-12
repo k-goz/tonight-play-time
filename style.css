@@ -114,6 +114,28 @@ body {
   transform: scale(0.9);
 }
 
+.parent-entry,
+.parent-lock {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.45rem 0.75rem;
+  border: 1px solid rgba(124, 92, 252, 0.22);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--color-primary-dark);
+  box-shadow: var(--shadow-sm);
+  font-family: var(--font-family);
+  font-size: 0.85rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.parent-lock {
+  color: #6B7280;
+  box-shadow: none;
+}
+
 /* ---------- 时间信息 ---------- */
 .time-info {
   text-align: center;
@@ -505,6 +527,31 @@ body {
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+}
+
+.completion-pin-gate {
+  padding: 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid rgba(124, 92, 252, 0.22);
+  border-radius: var(--radius-md);
+  background: rgba(237, 233, 254, 0.58);
+  text-align: center;
+}
+
+.completion-pin-gate > p:first-child {
+  margin-bottom: 0.8rem;
+  color: var(--color-text-light);
+  line-height: 1.5;
+}
+
+.compact-pin-group .pin-input {
+  max-width: 150px;
+  padding: 0.65rem 0.75rem;
+  font-size: 1.15rem;
+}
+
+.retry-action {
+  margin-top: 0.75rem;
 }
 
 .modal-tip {

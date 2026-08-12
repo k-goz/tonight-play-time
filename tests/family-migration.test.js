@@ -70,8 +70,11 @@ test('legacy single-child database migrates records into a default child profile
           if (sessionError) throw sessionError;
           db.get('PRAGMA user_version', (versionError, version) => {
             if (versionError) throw versionError;
-            process.stdout.write(JSON.stringify({ child, session, version: version.user_version }));
-            db.close();
+            db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'parent_grants'", (grantError, grantTable) => {
+              if (grantError) throw grantError;
+              process.stdout.write(JSON.stringify({ child, session, grantTable, version: version.user_version }));
+              db.close();
+            });
           });
         });
       });
@@ -85,7 +88,8 @@ test('legacy single-child database migrates records into a default child profile
 
   assert.equal(result.status, 0, result.stderr);
   const migrated = JSON.parse(result.stdout);
-  assert.equal(migrated.version, 3);
+  assert.equal(migrated.version, 4);
+  assert.equal(migrated.grantTable.name, 'parent_grants');
   assert.equal(migrated.child.name, '老大');
   assert.equal(migrated.child.bedtime, '22:10');
   assert.equal(migrated.child.weekend_bedtime, '22:10');
@@ -172,8 +176,11 @@ test('V2 family database gains weekend rules and archive state without losing hi
           if (sessionError) throw sessionError;
           db.get('PRAGMA user_version', (versionError, version) => {
             if (versionError) throw versionError;
-            process.stdout.write(JSON.stringify({ child, session, version: version.user_version }));
-            db.close();
+            db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'parent_grants'", (grantError, grantTable) => {
+              if (grantError) throw grantError;
+              process.stdout.write(JSON.stringify({ child, session, grantTable, version: version.user_version }));
+              db.close();
+            });
           });
         });
       });
@@ -187,12 +194,103 @@ test('V2 family database gains weekend rules and archive state without losing hi
 
   assert.equal(result.status, 0, result.stderr);
   const migrated = JSON.parse(result.stdout);
-  assert.equal(migrated.version, 3);
+  assert.equal(migrated.version, 4);
+  assert.equal(migrated.grantTable.name, 'parent_grants');
   assert.equal(migrated.child.weekend_bedtime, '20:50');
   assert.equal(migrated.child.archived_at, null);
   assert.equal(migrated.session.child_id, 5);
   assert.equal(migrated.session.homework_seconds, 1200);
   assert.equal(migrated.session.title, '保留记录');
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('V3 family rules database upgrades to scoped parent grants', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'tonight-parent-migration-'));
+  const databasePath = path.join(directory, 'family-v3.db');
+  const database = new sqlite3.Database(databasePath);
+
+  await execSql(database, `
+    CREATE TABLE users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      nickname TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      pin_code TEXT,
+      parent_pin_hash TEXT,
+      bedtime TEXT,
+      settings_initialized BOOLEAN NOT NULL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE child_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      name TEXT NOT NULL,
+      avatar TEXT NOT NULL DEFAULT '🌙',
+      bedtime TEXT NOT NULL DEFAULT '21:30',
+      weekend_bedtime TEXT NOT NULL DEFAULT '21:30',
+      is_default BOOLEAN NOT NULL DEFAULT 0,
+      archived_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE homework_sessions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER NOT NULL,
+      child_id INTEGER NOT NULL,
+      date TEXT NOT NULL,
+      bedtime TEXT DEFAULT '21:30',
+      state TEXT DEFAULT 'idle',
+      homework_seconds REAL DEFAULT 0,
+      paused_seconds REAL DEFAULT 0,
+      remaining_seconds REAL DEFAULT 0,
+      reward_choice TEXT,
+      title TEXT,
+      call_it_a_day BOOLEAN DEFAULT 0,
+      UNIQUE (user_id, child_id, date)
+    );
+    INSERT INTO users (id, username, nickname, password_hash, bedtime, settings_initialized)
+      VALUES (1, 'family_v3', '家庭', 'hash', '21:30', 1);
+    INSERT INTO child_profiles (
+      id, user_id, name, bedtime, weekend_bedtime, is_default
+    ) VALUES (3, 1, '小朋友', '21:00', '22:00', 1);
+    INSERT INTO homework_sessions (id, user_id, child_id, date, state, homework_seconds)
+      VALUES (6, 1, 3, '2026-08-03', 'paused', 600);
+    PRAGMA user_version = 3;
+  `);
+  await new Promise((resolve, reject) => database.close(error => error ? reject(error) : resolve()));
+
+  const inspectionScript = `
+    const { db, databaseReady } = require('./backend/server');
+    databaseReady.then(() => {
+      db.get('SELECT * FROM child_profiles WHERE id = 3', (childError, child) => {
+        if (childError) throw childError;
+        db.get('SELECT * FROM homework_sessions WHERE id = 6', (sessionError, session) => {
+          if (sessionError) throw sessionError;
+          db.get("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'parent_grants'", (grantError, grantTable) => {
+            if (grantError) throw grantError;
+            db.get('PRAGMA user_version', (versionError, version) => {
+              if (versionError) throw versionError;
+              process.stdout.write(JSON.stringify({ child, session, grantTable, version: version.user_version }));
+              db.close();
+            });
+          });
+        });
+      });
+    }).catch(error => { console.error(error); process.exitCode = 1; });
+  `;
+  const result = spawnSync(process.execPath, ['-e', inspectionScript], {
+    cwd: path.resolve(__dirname, '..'),
+    env: { ...process.env, DATABASE_PATH: databasePath },
+    encoding: 'utf8'
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  const migrated = JSON.parse(result.stdout);
+  assert.equal(migrated.version, 4);
+  assert.equal(migrated.grantTable.name, 'parent_grants');
+  assert.equal(migrated.child.weekend_bedtime, '22:00');
+  assert.equal(migrated.session.homework_seconds, 600);
 
   fs.rmSync(directory, { recursive: true, force: true });
 });

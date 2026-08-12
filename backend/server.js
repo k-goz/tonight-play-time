@@ -137,7 +137,18 @@ function migrateToFamilySchema(resolve, reject) {
       ON child_profiles(user_id) WHERE is_default = 1;
     CREATE INDEX IF NOT EXISTS idx_child_profiles_user
       ON child_profiles(user_id);
-    PRAGMA user_version = 3;
+    CREATE TABLE IF NOT EXISTS parent_grants (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      scope TEXT NOT NULL CHECK (scope IN ('manage', 'approve')),
+      expires_at INTEGER NOT NULL,
+      used_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_parent_grants_user
+      ON parent_grants(user_id);
+    PRAGMA user_version = 4;
     COMMIT;
   `;
 
@@ -162,12 +173,44 @@ function migrateToRulesSchema(resolve, reject) {
     statements.push(`UPDATE child_profiles
       SET weekend_bedtime = bedtime
       ${addsWeekendBedtime ? '' : "WHERE weekend_bedtime IS NULL OR weekend_bedtime = ''"}`);
-    statements.push('PRAGMA user_version = 3');
+    statements.push(`CREATE TABLE IF NOT EXISTS parent_grants (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      scope TEXT NOT NULL CHECK (scope IN ('manage', 'approve')),
+      expires_at INTEGER NOT NULL,
+      used_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`);
+    statements.push('CREATE INDEX IF NOT EXISTS idx_parent_grants_user ON parent_grants(user_id)');
+    statements.push('PRAGMA user_version = 4');
 
     db.exec(`BEGIN IMMEDIATE; ${statements.join('; ')}; COMMIT;`, (error) => {
       if (!error) return resolve();
       db.run('ROLLBACK', () => reject(error));
     });
+  });
+}
+
+function migrateToParentAccessSchema(resolve, reject) {
+  db.exec(`
+    BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS parent_grants (
+      token_hash TEXT PRIMARY KEY,
+      user_id INTEGER NOT NULL,
+      scope TEXT NOT NULL CHECK (scope IN ('manage', 'approve')),
+      expires_at INTEGER NOT NULL,
+      used_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_parent_grants_user
+      ON parent_grants(user_id);
+    PRAGMA user_version = 4;
+    COMMIT;
+  `, (error) => {
+    if (!error) return resolve();
+    db.run('ROLLBACK', () => reject(error));
   });
 }
 
@@ -241,6 +284,7 @@ const databaseReady = new Promise((resolve, reject) => {
       if (error) return reject(error);
       if ((row?.user_version || 0) < 2) return migrateToFamilySchema(resolve, reject);
       if ((row?.user_version || 0) < 3) return migrateToRulesSchema(resolve, reject);
+      if ((row?.user_version || 0) < 4) return migrateToParentAccessSchema(resolve, reject);
 
       db.exec(`
         CREATE TABLE IF NOT EXISTS child_profiles (
@@ -262,6 +306,17 @@ const databaseReady = new Promise((resolve, reject) => {
           ON child_profiles(user_id);
         CREATE INDEX IF NOT EXISTS idx_sessions_user_child
           ON homework_sessions(user_id, child_id);
+        CREATE TABLE IF NOT EXISTS parent_grants (
+          token_hash TEXT PRIMARY KEY,
+          user_id INTEGER NOT NULL,
+          scope TEXT NOT NULL CHECK (scope IN ('manage', 'approve')),
+          expires_at INTEGER NOT NULL,
+          used_at DATETIME,
+          created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+          FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_parent_grants_user
+          ON parent_grants(user_id);
       `, (schemaError) => schemaError ? reject(schemaError) : resolve());
     });
   });
@@ -307,6 +362,65 @@ function createToken(userId, callback) {
     [tokenHash, userId, expiresAt],
     (error) => callback(error, token)
   );
+}
+
+const PARENT_GRANT_TTL = {
+  manage: 15 * 60 * 1000,
+  approve: 5 * 60 * 1000
+};
+
+function createParentGrant(userId, scope, callback) {
+  const token = crypto.randomBytes(32).toString('hex');
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  const expiresAt = Date.now() + PARENT_GRANT_TTL[scope];
+  db.run(
+    'DELETE FROM parent_grants WHERE user_id = ? AND (expires_at <= ? OR used_at IS NOT NULL)',
+    [userId, Date.now()],
+    (cleanupError) => {
+      if (cleanupError) return callback(cleanupError);
+      db.run(
+        `INSERT INTO parent_grants (token_hash, user_id, scope, expires_at)
+         VALUES (?, ?, ?, ?)`,
+        [tokenHash, userId, scope, expiresAt],
+        (error) => callback(error, { token, expiresAt })
+      );
+    }
+  );
+}
+
+function verifyParentGrant(req, headerName, scope, consume, callback) {
+  const rawToken = req.headers[headerName] || '';
+  if (!/^[a-f0-9]{64}$/i.test(rawToken)) return callback(null, false);
+  const tokenHash = crypto.createHash('sha256').update(rawToken).digest('hex');
+  db.get(
+    `SELECT token_hash FROM parent_grants
+     WHERE token_hash = ? AND user_id = ? AND scope = ?
+       AND expires_at > ? AND used_at IS NULL`,
+    [tokenHash, req.userId, scope, Date.now()],
+    (error, grant) => {
+      if (error || !grant) return callback(error, false);
+      if (!consume) {
+        req.parentTokenHash = tokenHash;
+        return callback(null, true);
+      }
+      db.run(
+        `UPDATE parent_grants SET used_at = CURRENT_TIMESTAMP
+         WHERE token_hash = ? AND user_id = ? AND used_at IS NULL`,
+        [tokenHash, req.userId],
+        function onConsume(updateError) {
+          callback(updateError, !updateError && this.changes === 1);
+        }
+      );
+    }
+  );
+}
+
+function parentAuth(req, res, next) {
+  verifyParentGrant(req, 'x-parent-token', 'manage', false, (error, valid) => {
+    if (error) return res.status(500).json({ detail: '家长授权验证失败' });
+    if (!valid) return res.status(403).json({ detail: '请先验证家长密码' });
+    next();
+  });
 }
 
 function auth(req, res, next) {
@@ -492,9 +606,12 @@ app.post('/api/auth/login', (req, res) => {
 });
 
 app.post('/api/auth/logout', auth, (req, res) => {
-  db.run('DELETE FROM auth_tokens WHERE token_hash = ?', [req.tokenHash], (error) => {
-    if (error) return res.status(500).json({ detail: '退出失败' });
-    res.json({ message: '已退出' });
+  db.run('DELETE FROM parent_grants WHERE user_id = ?', [req.userId], (grantError) => {
+    if (grantError) return res.status(500).json({ detail: '退出失败' });
+    db.run('DELETE FROM auth_tokens WHERE token_hash = ?', [req.tokenHash], (error) => {
+      if (error) return res.status(500).json({ detail: '退出失败' });
+      res.json({ message: '已退出' });
+    });
   });
 });
 
@@ -522,7 +639,7 @@ app.get('/api/children', auth, (req, res) => {
   );
 });
 
-app.post('/api/children', auth, (req, res) => {
+app.post('/api/children', auth, parentAuth, (req, res) => {
   const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const avatar = typeof req.body.avatar === 'string' ? req.body.avatar.trim() : '🌟';
   const bedtime = req.body.bedtime || '21:30';
@@ -561,7 +678,7 @@ app.post('/api/children', auth, (req, res) => {
   });
 });
 
-app.put('/api/children/:id', auth, (req, res) => {
+app.put('/api/children/:id', auth, parentAuth, (req, res) => {
   const childId = parsePositiveId(req.params.id);
   if (!childId) return res.status(400).json({ detail: '孩子档案编号不正确' });
   const allowed = new Set(['name', 'avatar', 'bedtime', 'weekend_bedtime']);
@@ -620,7 +737,7 @@ app.put('/api/children/:id', auth, (req, res) => {
   );
 });
 
-app.post('/api/children/:id/archive', auth, (req, res) => {
+app.post('/api/children/:id/archive', auth, parentAuth, (req, res) => {
   const childId = parsePositiveId(req.params.id);
   const archived = req.body.archived;
   if (!childId) return res.status(400).json({ detail: '孩子档案编号不正确' });
@@ -700,7 +817,7 @@ app.get('/api/settings', auth, (req, res) => {
   });
 });
 
-app.put('/api/settings', auth, (req, res) => {
+app.put('/api/settings', auth, parentAuth, (req, res) => {
   const userUpdates = [];
   const userValues = [];
   const childUpdates = [];
@@ -774,7 +891,11 @@ app.put('/api/settings', auth, (req, res) => {
 
 app.post('/api/settings/verify-pin', auth, (req, res) => {
   const pin = req.body.parent_pin;
+  const purpose = req.body.purpose || 'manage';
   if (!validPin(pin)) return res.status(400).json({ detail: '家长密码必须是4位数字' });
+  if (!['manage', 'approve'].includes(purpose)) {
+    return res.status(400).json({ detail: '家长验证用途不正确' });
+  }
 
   db.get(
     'SELECT parent_pin_hash, pin_code FROM users WHERE id = ?',
@@ -787,13 +908,31 @@ app.post('/api/settings/verify-pin', auth, (req, res) => {
         ? verifyPassword(pin, user.parent_pin_hash)
         : pin === (user.pin_code || '1234');
 
-      if (valid && !user.parent_pin_hash) {
+      if (!valid) return res.json({ valid: false });
+
+      if (!user.parent_pin_hash) {
         db.run(
           'UPDATE users SET parent_pin_hash = ?, pin_code = NULL WHERE id = ?',
           [hashPassword(pin), req.userId]
         );
       }
-      res.json({ valid });
+
+      createParentGrant(req.userId, purpose, (grantError, grant) => {
+        if (grantError) return res.status(500).json({ detail: '家长授权创建失败' });
+        const tokenField = purpose === 'manage' ? 'parent_token' : 'approval_token';
+        res.json({ valid: true, [tokenField]: grant.token, expires_at: grant.expiresAt });
+      });
+    }
+  );
+});
+
+app.delete('/api/settings/parent-access', auth, parentAuth, (req, res) => {
+  db.run(
+    'DELETE FROM parent_grants WHERE token_hash = ? AND user_id = ?',
+    [req.parentTokenHash, req.userId],
+    (error) => {
+      if (error) return res.status(500).json({ detail: '家长模式锁定失败' });
+      res.json({ message: '已退出家长模式' });
     }
   );
 });
@@ -870,7 +1009,7 @@ function normalizeImportedRecord(record) {
   };
 }
 
-app.post('/api/sessions/import', auth, (req, res) => {
+app.post('/api/sessions/import', auth, parentAuth, (req, res) => {
   const records = req.body.records;
   if (!Array.isArray(records) || records.length === 0 || records.length > 100) {
     return res.status(400).json({ detail: '导入记录数量必须为1-100条' });
@@ -967,6 +1106,7 @@ const BOOLEAN_FIELDS = new Set([
   'completed', 'homework_done', 'correction_done', 'attitude_good', 'call_it_a_day'
 ]);
 const VALID_STATES = new Set(['idle', 'running', 'paused', 'reviewing', 'completed']);
+const CHILD_COMPLETED_UPDATE_FIELDS = new Set(['playtime_type', 'reward_choice']);
 
 function validateSessionUpdates(updates) {
   const keys = Object.keys(updates);
@@ -1006,27 +1146,47 @@ app.put('/api/sessions/:id', auth, (req, res) => {
       const keys = Object.keys(updates);
       if (keys.length === 0) return res.json(session);
 
-      const assignments = keys.map((key) => `${key} = ?`);
-      const values = keys.map((key) => updates[key]);
-      assignments.push('updated_at = CURRENT_TIMESTAMP');
-      values.push(id, req.userId);
+      const saveUpdates = () => {
+        const assignments = keys.map((key) => `${key} = ?`);
+        const values = keys.map((key) => updates[key]);
+        assignments.push('updated_at = CURRENT_TIMESTAMP');
+        values.push(id, req.userId);
 
-      db.run(
-        `UPDATE homework_sessions SET ${assignments.join(', ')} WHERE id = ? AND user_id = ?`,
-        values,
-        (updateError) => {
-          if (updateError) return res.status(500).json({ detail: '更新失败' });
-          db.get('SELECT * FROM homework_sessions WHERE id = ?', [id], (readError, updated) => {
-            if (readError) return res.status(500).json({ detail: '记录读取失败' });
-            res.json(updated);
-          });
-        }
-      );
+        db.run(
+          `UPDATE homework_sessions SET ${assignments.join(', ')} WHERE id = ? AND user_id = ?`,
+          values,
+          (updateError) => {
+            if (updateError) return res.status(500).json({ detail: '更新失败' });
+            db.get('SELECT * FROM homework_sessions WHERE id = ?', [id], (readError, updated) => {
+              if (readError) return res.status(500).json({ detail: '记录读取失败' });
+              res.json(updated);
+            });
+          }
+        );
+      };
+
+      if (session.completed) {
+        if (keys.every(key => CHILD_COMPLETED_UPDATE_FIELDS.has(key))) return saveUpdates();
+        return verifyParentGrant(req, 'x-parent-token', 'manage', false, (grantError, valid) => {
+          if (grantError) return res.status(500).json({ detail: '家长授权验证失败' });
+          if (!valid) return res.status(403).json({ detail: '已完成记录只能由家长修改' });
+          saveUpdates();
+        });
+      }
+
+      const requestsCompletion = updates.completed === true || updates.completed === 1 ||
+        updates.state === 'completed';
+      if (!requestsCompletion) return saveUpdates();
+      verifyParentGrant(req, 'x-parent-approval', 'approve', true, (grantError, valid) => {
+        if (grantError) return res.status(500).json({ detail: '家长确认验证失败' });
+        if (!valid) return res.status(403).json({ detail: '完成作业需要家长确认' });
+        saveUpdates();
+      });
     }
   );
 });
 
-app.delete('/api/sessions', auth, (req, res) => {
+app.delete('/api/sessions', auth, parentAuth, (req, res) => {
   resolveOwnedChild(req.userId, req.query.child_id, (childError, child) => {
     if (childError) return childErrorResponse(res, childError);
     db.run(
@@ -1044,18 +1204,34 @@ app.delete('/api/sessions/:id', auth, (req, res) => {
   const id = Number.parseInt(req.params.id, 10);
   if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ detail: '记录编号不正确' });
 
-  db.run(
-    'DELETE FROM homework_sessions WHERE id = ? AND user_id = ?',
+  db.get(
+    'SELECT completed FROM homework_sessions WHERE id = ? AND user_id = ?',
     [id, req.userId],
-    function onDelete(error) {
-      if (error) return res.status(500).json({ detail: '删除失败' });
-      if (this.changes === 0) return res.status(404).json({ detail: '记录不存在' });
-      res.json({ message: '已删除' });
+    (readError, session) => {
+      if (readError) return res.status(500).json({ detail: '记录读取失败' });
+      if (!session) return res.status(404).json({ detail: '记录不存在' });
+
+      const deleteSession = () => db.run(
+        'DELETE FROM homework_sessions WHERE id = ? AND user_id = ?',
+        [id, req.userId],
+        function onDelete(error) {
+          if (error) return res.status(500).json({ detail: '删除失败' });
+          if (this.changes === 0) return res.status(404).json({ detail: '记录不存在' });
+          res.json({ message: '已删除' });
+        }
+      );
+
+      if (!session.completed) return deleteSession();
+      verifyParentGrant(req, 'x-parent-token', 'manage', false, (grantError, valid) => {
+        if (grantError) return res.status(500).json({ detail: '家长授权验证失败' });
+        if (!valid) return res.status(403).json({ detail: '已完成记录只能由家长删除' });
+        deleteSession();
+      });
     }
   );
 });
 
-app.get('/api/stats', auth, (req, res) => {
+app.get('/api/stats', auth, parentAuth, (req, res) => {
   const requestedDays = Number.parseInt(req.query.days, 10);
   const days = Number.isFinite(requestedDays) ? Math.min(Math.max(requestedDays, 1), 365) : 30;
   const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString().split('T')[0];

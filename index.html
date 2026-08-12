@@ -11,7 +11,7 @@
   <link rel="manifest" href="manifest.json">
   <link rel="apple-touch-icon" href="icons/icon-192.png">
   <title>今晚还能玩多久</title>
-  <link rel="stylesheet" href="style.css?v=8">
+  <link rel="stylesheet" href="style.css?v=9">
 </head>
 <body>
   <div id="app">
@@ -79,7 +79,9 @@
             <span id="active-child-avatar" class="child-switcher-avatar">🌙</span>
             <select id="child-selector" class="child-selector" aria-label="切换孩子"></select>
           </div>
-          <button id="btn-stats" class="btn-icon" title="家长数据">📊</button>
+          <button id="btn-stats" class="parent-entry" title="进入家长模式">
+            <span aria-hidden="true">🔒</span><span>家长</span>
+          </button>
         </div>
       </header>
 
@@ -160,30 +162,43 @@
           <span class="modal-icon">🔍</span>
           <h2>请爸爸妈妈检查一下</h2>
         </div>
-        <div class="checklist">
-          <label class="check-item">
-            <input type="checkbox" id="check-homework">
-            <span class="check-box"></span>
-            <span class="check-text">作业完成了</span>
-          </label>
-          <label class="check-item">
-            <input type="checkbox" id="check-corrections">
-            <span class="check-box"></span>
-            <span class="check-text">订正完成了</span>
-          </label>
-          <label class="check-item">
-            <input type="checkbox" id="check-attitude">
-            <span class="check-box"></span>
-            <span class="check-text">今天写得认真</span>
-          </label>
+        <div id="completion-pin-gate" class="completion-pin-gate">
+          <p>家长输入 4 位密码后，才能确认今天的完成情况。</p>
+          <div class="pin-input-group compact-pin-group">
+            <input type="password" id="completion-pin-input" class="pin-input" maxlength="4"
+              placeholder="· · · ·" inputmode="numeric" aria-label="完成确认家长密码">
+            <button id="btn-completion-pin" class="btn btn-primary">家长验证</button>
+          </div>
+          <p id="completion-pin-message" class="pin-hint" aria-live="polite"></p>
         </div>
-        <div class="modal-buttons">
-          <button id="btn-confirm" class="btn btn-success btn-large" disabled>
-            🎉 确认完成，解锁快乐时间
-          </button>
-          <button id="btn-call-it-a-day" class="btn btn-secondary">
-            🌙 今天就到这吧
-          </button>
+        <div id="completion-review" style="display:none;">
+          <div class="checklist">
+            <label class="check-item">
+              <input type="checkbox" id="check-homework">
+              <span class="check-box"></span>
+              <span class="check-text">作业完成了</span>
+            </label>
+            <label class="check-item">
+              <input type="checkbox" id="check-corrections">
+              <span class="check-box"></span>
+              <span class="check-text">订正完成了</span>
+            </label>
+            <label class="check-item">
+              <input type="checkbox" id="check-attitude">
+              <span class="check-box"></span>
+              <span class="check-text">今天写得认真</span>
+            </label>
+          </div>
+          <div class="modal-buttons">
+            <button id="btn-confirm" class="btn btn-success btn-large" disabled>
+              🎉 确认完成，解锁快乐时间
+            </button>
+            <button id="btn-call-it-a-day" class="btn btn-secondary">
+              🌙 今天就到这吧
+            </button>
+          </div>
+        </div>
+        <div class="modal-buttons retry-action">
           <button id="btn-retry" class="btn btn-warning">
             ✏️ 还要再改一改
           </button>
@@ -237,14 +252,17 @@
       <header class="header">
         <div class="header-left">
           <button id="btn-back" class="btn-icon">← 返回</button>
-          <span class="app-title">📊 家长数据</span>
+          <span class="app-title">🛡️ 家长模式</span>
+        </div>
+        <div class="header-right">
+          <button id="btn-lock-parent" class="parent-lock" style="display:none;">🔒 退出家长模式</button>
         </div>
       </header>
 
       <!-- PIN 输入 -->
       <div id="pin-area" class="pin-area">
         <div class="pin-icon">🔒</div>
-        <h2>请输入家长密码</h2>
+        <h2>进入家长模式</h2>
         <div class="pin-input-group">
           <input type="password" id="pin-input" class="pin-input" maxlength="4" placeholder="· · · ·" inputmode="numeric">
           <button id="btn-pin" class="btn btn-primary">确认</button>
@@ -353,8 +371,8 @@
     </div>
   </div>
 
-  <script src="time-utils.js?v=8"></script>
-  <script src="api-service.js?v=8"></script>
-  <script src="app.js?v=8"></script>
+  <script src="time-utils.js?v=9"></script>
+  <script src="api-service.js?v=9"></script>
+  <script src="app.js?v=9"></script>
 </body>
 </html>

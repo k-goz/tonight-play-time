@@ -332,8 +332,11 @@ const App = {
     this.lastPersistedBucket = -1;
     this.pendingLocalRecords = [];
     this.pendingLocalSettings = null;
+    this.pendingRemoteSettingsInitialization = null;
     this.children = [];
     this.activeChild = null;
+    this.parentApprovalToken = null;
+    this.parentModeTimer = null;
 
     this.bindEvents();
     this.bindAuthEvents();
@@ -415,6 +418,11 @@ const App = {
     document.getElementById('btn-pin').addEventListener('click', () => this.verifyPin());
     document.getElementById('pin-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') this.verifyPin();
+    });
+    document.getElementById('btn-lock-parent').addEventListener('click', () => this.lockParentMode());
+    document.getElementById('btn-completion-pin').addEventListener('click', () => this.verifyCompletionPin());
+    document.getElementById('completion-pin-input').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') this.verifyCompletionPin();
     });
 
     // 数据页签切换
@@ -560,7 +568,9 @@ const App = {
   async activateAccountStorage(preferredChildId = null) {
     if (!this.user?.user_id) return;
     this.pendingLocalRecords = Storage.getLocalRecords().filter(record => !record.migratedToAccount);
-    this.pendingLocalSettings = Storage.getLocalSettings();
+    this.pendingLocalSettings = localStorage.getItem(STORAGE_KEYS.SETTINGS)
+      ? Storage.getLocalSettings()
+      : null;
     this.children = await API_SERVICE.getChildren();
     const activeChildren = this.children.filter(child => !child.archived_at);
     if (activeChildren.length === 0) throw new Error('账号缺少可用的孩子档案');
@@ -575,9 +585,10 @@ const App = {
 
     if (!Storage.has(STORAGE_KEYS.SETTINGS)) {
       Storage.saveSettings({
-        bedtime: this.activeChild.bedtime || this.pendingLocalSettings.bedtime,
+        bedtime: this.activeChild.bedtime || this.pendingLocalSettings?.bedtime || '21:30',
         weekendBedtime: this.activeChild.weekend_bedtime ||
-          this.pendingLocalSettings.weekendBedtime || this.pendingLocalSettings.bedtime
+          this.pendingLocalSettings?.weekendBedtime || this.pendingLocalSettings?.bedtime ||
+          this.activeChild.bedtime
       });
     }
     Storage.moveLocalTodayStateToAccount();
@@ -792,7 +803,7 @@ const App = {
 
     try {
       await this.syncSettingsFromServer();
-      await this.migrateLocalRecordsToServer();
+      if (API_SERVICE.hasParentAccess()) await this.migrateLocalRecordsToServer();
       const today = TimeUtils.getBeijingDateStr();
       const sessions = await API_SERVICE.getSessions(this.activeChild.id, 100);
       const todaySession = sessions.find(s => s.date === today);
@@ -825,19 +836,16 @@ const App = {
     const remoteSettings = await API_SERVICE.getSettings(this.activeChild.id);
     if (!remoteSettings.initialized) {
       const initialSettings = this.pendingLocalSettings || this.settings;
-      const payload = {
-        bedtime: initialSettings.bedtime,
-        weekend_bedtime: initialSettings.weekendBedtime || initialSettings.bedtime
-      };
-      if (!remoteSettings.pin_configured) {
-        payload.parent_pin = initialSettings.parentPin || '1234';
-      }
-      await API_SERVICE.updateSettings(this.activeChild.id, payload);
       this.settings = {
         bedtime: initialSettings.bedtime,
         weekendBedtime: initialSettings.weekendBedtime || initialSettings.bedtime
       };
+      this.pendingRemoteSettingsInitialization = {
+        pinConfigured: remoteSettings.pin_configured,
+        parentPin: initialSettings.parentPin || '1234'
+      };
     } else {
+      this.pendingRemoteSettingsInitialization = null;
       this.settings = {
         bedtime: remoteSettings.bedtime,
         weekendBedtime: remoteSettings.weekend_bedtime || remoteSettings.bedtime
@@ -854,6 +862,19 @@ const App = {
     Storage.saveSettings(this.settings);
     this.updateBedtimeDisplay();
     this.renderChildSwitcher();
+  },
+
+  async initializeRemoteSettingsIfNeeded() {
+    if (!this.apiReady || !this.pendingRemoteSettingsInitialization) return;
+    const payload = {
+      bedtime: this.settings.bedtime,
+      weekend_bedtime: this.settings.weekendBedtime
+    };
+    if (!this.pendingRemoteSettingsInitialization.pinConfigured) {
+      payload.parent_pin = this.pendingRemoteSettingsInitialization.parentPin;
+    }
+    await API_SERVICE.updateSettings(this.activeChild.id, payload);
+    this.pendingRemoteSettingsInitialization = null;
   },
 
   localRecordToImport(record) {
@@ -996,7 +1017,7 @@ const App = {
     return this.sessionPromise;
   },
 
-  async syncCurrentSession(extra = {}) {
+  async syncCurrentSession(extra = {}, { approvalToken = null, throwOnError = false } = {}) {
     if (!this.apiReady) return;
     try {
       const sessionId = await this.ensureServerSession();
@@ -1011,9 +1032,13 @@ const App = {
         completed: this.state === STATE.COMPLETED,
         ...extra
       };
-      await API_SERVICE.updateSession(sessionId, payload);
+      await API_SERVICE.updateSession(sessionId, payload, {
+        approvalToken,
+        requiresParent: this.state === STATE.COMPLETED && API_SERVICE.hasParentAccess()
+      });
     } catch (error) {
       console.warn('Failed to sync current session:', error);
+      if (throwOnError) throw error;
     }
   },
 
@@ -1123,7 +1148,7 @@ const App = {
     this.showTemporaryTip('🕵️ 小侦探发现还有一点点需要修正，加油，马上就能解锁快乐时间！');
   },
 
-  confirmComplete() {
+  async confirmComplete() {
     const now = TimeUtils.getBeijingNow();
     const bedtimeStr = this.getCurrentBedtime(now);
     const remainingSeconds = this.frozenRemainingSeconds !== null 
@@ -1147,6 +1172,33 @@ const App = {
       }
     };
 
+    const confirmButton = document.getElementById('btn-confirm');
+    confirmButton.disabled = true;
+    confirmButton.textContent = '正在保存…';
+    try {
+      await this.syncCurrentSession({
+        state: STATE.COMPLETED,
+        end_time: now.toISOString(),
+        completed: true,
+        homework_done: record.checklist.homeworkDone,
+        correction_done: record.checklist.correctionsDone,
+        attitude_good: record.checklist.attitudeGood,
+        playtime_minutes: remainingSeconds / 60,
+        remaining_seconds: remainingSeconds,
+        reward_choice: '',
+        title: record.title,
+        call_it_a_day: false
+      }, { approvalToken: this.parentApprovalToken, throwOnError: true });
+    } catch (error) {
+      this.parentApprovalToken = null;
+      document.getElementById('completion-review').style.display = 'none';
+      document.getElementById('completion-pin-gate').style.display = '';
+      document.getElementById('completion-pin-input').value = '';
+      document.getElementById('completion-pin-message').textContent = error.message || '保存失败，请重新验证';
+      confirmButton.textContent = '🎉 确认完成，解锁快乐时间';
+      return;
+    }
+
     // 保存记录
     Storage.addRecord(record);
     Storage.clearTodayState();
@@ -1155,22 +1207,11 @@ const App = {
     this.stopTimer();
     this.stopEncouragementRotation();
     this.hideParentConfirm();
-    this.syncCurrentSession({
-      end_time: now.toISOString(),
-      completed: true,
-      homework_done: record.checklist.homeworkDone,
-      correction_done: record.checklist.correctionsDone,
-      attitude_good: record.checklist.attitudeGood,
-      playtime_minutes: remainingSeconds / 60,
-      remaining_seconds: remainingSeconds,
-      reward_choice: '',
-      title: record.title,
-      call_it_a_day: false
-    });
+    confirmButton.textContent = '🎉 确认完成，解锁快乐时间';
     this.showCelebration(record);
   },
 
-  callItADay() {
+  async callItADay() {
     SoundUtils.playClick();
     const now = TimeUtils.getBeijingNow();
     const bedtimeStr = this.getCurrentBedtime(now);
@@ -1196,6 +1237,34 @@ const App = {
       }
     };
 
+    const callItADayButton = document.getElementById('btn-call-it-a-day');
+    callItADayButton.disabled = true;
+    callItADayButton.textContent = '正在保存…';
+    try {
+      await this.syncCurrentSession({
+        state: STATE.COMPLETED,
+        end_time: now.toISOString(),
+        completed: true,
+        homework_done: record.checklist.homeworkDone,
+        correction_done: record.checklist.correctionsDone,
+        attitude_good: record.checklist.attitudeGood,
+        playtime_minutes: 0,
+        remaining_seconds: remainingSeconds,
+        reward_choice: '',
+        title: '',
+        call_it_a_day: true
+      }, { approvalToken: this.parentApprovalToken, throwOnError: true });
+    } catch (error) {
+      this.parentApprovalToken = null;
+      document.getElementById('completion-review').style.display = 'none';
+      document.getElementById('completion-pin-gate').style.display = '';
+      document.getElementById('completion-pin-input').value = '';
+      document.getElementById('completion-pin-message').textContent = error.message || '保存失败，请重新验证';
+      callItADayButton.disabled = false;
+      callItADayButton.textContent = '🌙 今天就到这吧';
+      return;
+    }
+
     // 保存记录
     Storage.addRecord(record);
     Storage.clearTodayState();
@@ -1204,26 +1273,28 @@ const App = {
     this.stopTimer();
     this.stopEncouragementRotation();
     this.hideParentConfirm();
-    this.syncCurrentSession({
-      end_time: now.toISOString(),
-      completed: true,
-      homework_done: record.checklist.homeworkDone,
-      correction_done: record.checklist.correctionsDone,
-      attitude_good: record.checklist.attitudeGood,
-      playtime_minutes: 0,
-      remaining_seconds: remainingSeconds,
-      reward_choice: '',
-      title: '',
-      call_it_a_day: true
-    });
+    callItADayButton.disabled = false;
+    callItADayButton.textContent = '🌙 今天就到这吧';
     this.showCallItADayPage(record);
   },
 
-  resetToday() {
+  async resetToday() {
+    if (this.apiReady && this.state === STATE.COMPLETED && !API_SERVICE.hasParentAccess()) {
+      alert('已完成记录受家长模式保护。请先进入家长模式，再重新开始今天。');
+      return;
+    }
     if (!confirm('确定要重新开始今天吗？当前的作业计时会被清除。')) return;
 
     const previousState = this.state;
     const serverSessionId = this.currentSessionId;
+    if (this.apiReady && serverSessionId && previousState === STATE.COMPLETED) {
+      try {
+        await API_SERVICE.deleteSession(serverSessionId, { requiresParent: true });
+      } catch (error) {
+        alert(error.message || '已完成记录删除失败，请重新进入家长模式后重试。');
+        return;
+      }
+    }
     this.state = STATE.IDLE;
     this.stopTimer();
     this.stopEncouragementRotation();
@@ -1238,7 +1309,7 @@ const App = {
       const today = TimeUtils.getBeijingDateStr();
       Storage.saveRecords(Storage.getRecords().filter(record => record.date !== today));
     }
-    if (this.apiReady && serverSessionId) {
+    if (this.apiReady && serverSessionId && previousState !== STATE.COMPLETED) {
       API_SERVICE.deleteSession(serverSessionId).catch(error =>
         console.warn('Failed to delete server session:', error)
       );
@@ -1436,18 +1507,65 @@ const App = {
   // ---------- 家长确认弹窗 ----------
 
   showParentConfirm() {
+    this.parentApprovalToken = null;
     // 重置勾选状态
     document.getElementById('check-homework').checked = false;
     document.getElementById('check-corrections').checked = false;
     document.getElementById('check-attitude').checked = false;
     document.getElementById('btn-confirm').disabled = true;
     document.getElementById('parent-tip').style.display = 'none';
+    document.getElementById('completion-pin-input').value = '';
+    document.getElementById('completion-pin-message').textContent = this.apiReady
+      ? '本次验证只用于确认作业，不会进入家长管理模式。'
+      : '请输入本机家长密码。';
+    document.getElementById('completion-pin-gate').style.display = '';
+    document.getElementById('completion-review').style.display = 'none';
 
     document.getElementById('modal-parent').style.display = '';
   },
 
   hideParentConfirm() {
+    this.parentApprovalToken = null;
     document.getElementById('modal-parent').style.display = 'none';
+  },
+
+  async verifyCompletionPin() {
+    const input = document.getElementById('completion-pin-input').value;
+    const button = document.getElementById('btn-completion-pin');
+    const message = document.getElementById('completion-pin-message');
+    if (!/^\d{4}$/.test(input)) {
+      message.textContent = '请输入 4 位数字密码';
+      return;
+    }
+
+    button.disabled = true;
+    button.textContent = '验证中…';
+    try {
+      if (this.apiReady) {
+        const result = await API_SERVICE.requestParentApproval(input);
+        if (!result.valid) {
+          message.textContent = '密码不正确，请重试';
+          return;
+        }
+        this.parentApprovalToken = result.approval_token;
+      } else if (input !== this.settings.parentPin) {
+        message.textContent = '密码不正确，请重试';
+        return;
+      } else {
+        this.parentApprovalToken = 'local-approved';
+      }
+
+      document.getElementById('completion-pin-gate').style.display = 'none';
+      document.getElementById('completion-review').style.display = '';
+      this.updateConfirmButton();
+    } catch (error) {
+      message.textContent = this.apiReady
+        ? '网络不可用，账号模式需联网验证家长密码'
+        : '验证失败，请重试';
+    } finally {
+      button.disabled = false;
+      button.textContent = '家长验证';
+    }
   },
 
   updateConfirmButton() {
@@ -1613,10 +1731,12 @@ const App = {
       records[records.length - 1].rewardChoice = btn.dataset.choice;
       Storage.saveRecords(records);
     }
-    this.syncCurrentSession({
-      playtime_type: btn.dataset.choice,
-      reward_choice: btn.dataset.choice
-    });
+    if (this.apiReady && this.currentSessionId) {
+      API_SERVICE.updateSession(this.currentSessionId, {
+        playtime_type: btn.dataset.choice,
+        reward_choice: btn.dataset.choice
+      }).catch(error => console.warn('Failed to sync reward choice:', error));
+    }
   },
 
   // ---------- 状态持久化 ----------
@@ -1701,11 +1821,15 @@ const App = {
 
     // 重置 PIN 输入
     document.getElementById('pin-input').value = '';
-    document.getElementById('pin-area').style.display = '';
+    document.getElementById('pin-area').style.display = this.apiReady && API_SERVICE.hasParentAccess()
+      ? 'none'
+      : '';
     document.getElementById('stats-content').style.display = 'none';
+    document.getElementById('btn-lock-parent').style.display = 'none';
     document.querySelector('.pin-hint').textContent = this.apiReady
-      ? '账号模式：使用云端家长密码'
+      ? '验证后进入 15 分钟家长模式'
       : '默认密码：1234';
+    if (this.apiReady && API_SERVICE.hasParentAccess()) this.enterParentMode();
   },
 
   hideStatsPage() {
@@ -1735,7 +1859,7 @@ const App = {
     button.textContent = '验证中…';
     try {
       if (this.apiReady) {
-        const result = await API_SERVICE.verifyParentPin(input);
+        const result = await API_SERVICE.verifyParentPin(input, 'manage');
         valid = result.valid;
       } else {
         valid = input === this.settings.parentPin;
@@ -1748,15 +1872,56 @@ const App = {
     }
 
     if (valid) {
-      document.getElementById('pin-area').style.display = 'none';
-      document.getElementById('stats-content').style.display = '';
-      this.loadStatsData();
-      this.loadSettings();
-      this.renderFamilyProfiles();
+      await this.enterParentMode();
     } else {
       if (!hint.textContent.startsWith('网络不可用')) hint.textContent = '密码不正确，请重试';
       this.showPinError();
     }
+  },
+
+  async enterParentMode() {
+    const hint = document.querySelector('.pin-hint');
+    try {
+      if (this.apiReady) {
+        await this.initializeRemoteSettingsIfNeeded();
+        await this.syncFromServer({ restoreToday: false });
+      }
+      document.getElementById('pin-area').style.display = 'none';
+      document.getElementById('stats-content').style.display = '';
+      document.getElementById('btn-lock-parent').style.display = '';
+      this.loadStatsData();
+      this.loadSettings();
+      this.renderFamilyProfiles();
+      this.scheduleParentModeLock();
+    } catch (error) {
+      document.getElementById('pin-area').style.display = '';
+      document.getElementById('stats-content').style.display = 'none';
+      document.getElementById('btn-lock-parent').style.display = 'none';
+      hint.textContent = error.message || '家长模式加载失败，请重试';
+    }
+  },
+
+  scheduleParentModeLock() {
+    if (this.parentModeTimer) clearTimeout(this.parentModeTimer);
+    if (!this.apiReady) return;
+    const remaining = API_SERVICE.getParentRemainingMs();
+    if (remaining <= 0) return this.lockParentMode({ revoke: false });
+    this.parentModeTimer = setTimeout(
+      () => this.lockParentMode({ revoke: false }),
+      remaining + 50
+    );
+  },
+
+  async lockParentMode({ revoke = true } = {}) {
+    if (this.parentModeTimer) {
+      clearTimeout(this.parentModeTimer);
+      this.parentModeTimer = null;
+    }
+    if (this.apiReady) {
+      if (revoke) await API_SERVICE.lockParentAccess().catch(() => API_SERVICE.clearParentAccess());
+      else API_SERVICE.clearParentAccess();
+    }
+    if (document.getElementById('page-stats').classList.contains('active')) this.hideStatsPage();
   },
 
   showPinError() {

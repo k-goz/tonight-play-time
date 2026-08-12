@@ -7,6 +7,8 @@ const API_SERVICE = {
   BASE_URL: '',  // Will be set based on deployment
   token: null,
   user: null,
+  parentToken: null,
+  parentExpiresAt: 0,
 
   /**
    * Initialize API service
@@ -15,6 +17,9 @@ const API_SERVICE = {
     // Try to load saved token
     this.token = localStorage.getItem('api_token');
     this.user = JSON.parse(localStorage.getItem('api_user') || 'null');
+    this.parentToken = sessionStorage.getItem('parent_access_token');
+    this.parentExpiresAt = Number(sessionStorage.getItem('parent_access_expires_at')) || 0;
+    if (!this.hasParentAccess()) this.clearParentAccess();
     
     // Use relative URL (same origin) - works for both local and cloud deployment
     this.BASE_URL = '';
@@ -27,18 +32,23 @@ const API_SERVICE = {
    */
   async request(endpoint, options = {}) {
     const url = `${this.BASE_URL}${endpoint}`;
+    const { requiresParent = false, approvalToken = null, ...fetchOptions } = options;
     const headers = {
       'Content-Type': 'application/json',
-      ...options.headers
+      ...fetchOptions.headers
     };
 
     if (this.token) {
       headers['Authorization'] = `Bearer ${this.token}`;
     }
+    if (requiresParent && this.hasParentAccess()) {
+      headers['X-Parent-Token'] = this.parentToken;
+    }
+    if (approvalToken) headers['X-Parent-Approval'] = approvalToken;
 
     try {
       const response = await fetch(url, {
-        ...options,
+        ...fetchOptions,
         headers
       });
 
@@ -47,6 +57,7 @@ const API_SERVICE = {
         this.logout();
         throw new Error('认证失败，请重新登录');
       }
+      if (response.status === 403 && requiresParent) this.clearParentAccess();
 
       if (!response.ok) {
         const error = await response.json().catch(() => ({}));
@@ -102,6 +113,7 @@ const API_SERVICE = {
   logout() {
     this.token = null;
     this.user = null;
+    this.clearParentAccess();
     localStorage.removeItem('api_token');
     localStorage.removeItem('api_user');
   },
@@ -127,6 +139,21 @@ const API_SERVICE = {
    */
   isLoggedIn() {
     return !!this.token && !!this.user;
+  },
+
+  hasParentAccess() {
+    return Boolean(this.parentToken) && this.parentExpiresAt > Date.now();
+  },
+
+  getParentRemainingMs() {
+    return this.hasParentAccess() ? Math.max(0, this.parentExpiresAt - Date.now()) : 0;
+  },
+
+  clearParentAccess() {
+    this.parentToken = null;
+    this.parentExpiresAt = 0;
+    sessionStorage.removeItem('parent_access_token');
+    sessionStorage.removeItem('parent_access_expires_at');
   },
 
   /**
@@ -159,6 +186,7 @@ const API_SERVICE = {
   async createChild(child) {
     return await this.request('/api/children', {
       method: 'POST',
+      requiresParent: true,
       body: JSON.stringify(child)
     });
   },
@@ -169,6 +197,7 @@ const API_SERVICE = {
   async updateChild(childId, updates) {
     return await this.request(`/api/children/${childId}`, {
       method: 'PUT',
+      requiresParent: true,
       body: JSON.stringify(updates)
     });
   },
@@ -179,6 +208,7 @@ const API_SERVICE = {
   async setChildArchived(childId, archived) {
     return await this.request(`/api/children/${childId}/archive`, {
       method: 'POST',
+      requiresParent: true,
       body: JSON.stringify({ archived })
     });
   },
@@ -196,6 +226,7 @@ const API_SERVICE = {
   async updateSettings(childId, settings) {
     return await this.request('/api/settings', {
       method: 'PUT',
+      requiresParent: true,
       body: JSON.stringify({ ...settings, child_id: childId })
     });
   },
@@ -203,11 +234,37 @@ const API_SERVICE = {
   /**
    * Verify the parent PIN without downloading it to the browser.
    */
-  async verifyParentPin(parentPin) {
-    return await this.request('/api/settings/verify-pin', {
+  async verifyParentPin(parentPin, purpose = 'manage') {
+    const data = await this.request('/api/settings/verify-pin', {
       method: 'POST',
-      body: JSON.stringify({ parent_pin: parentPin })
+      body: JSON.stringify({ parent_pin: parentPin, purpose })
     });
+    if (data.valid && purpose === 'manage') {
+      this.parentToken = data.parent_token;
+      this.parentExpiresAt = data.expires_at;
+      sessionStorage.setItem('parent_access_token', this.parentToken);
+      sessionStorage.setItem('parent_access_expires_at', String(this.parentExpiresAt));
+    }
+    return data;
+  },
+
+  async requestParentApproval(parentPin) {
+    return await this.verifyParentPin(parentPin, 'approve');
+  },
+
+  async lockParentAccess() {
+    if (!this.hasParentAccess()) {
+      this.clearParentAccess();
+      return;
+    }
+    try {
+      await this.request('/api/settings/parent-access', {
+        method: 'DELETE',
+        requiresParent: true
+      });
+    } finally {
+      this.clearParentAccess();
+    }
   },
 
   /**
@@ -233,6 +290,7 @@ const API_SERVICE = {
   async importSessions(childId, records) {
     return await this.request('/api/sessions/import', {
       method: 'POST',
+      requiresParent: true,
       body: JSON.stringify({ child_id: childId, records })
     });
   },
@@ -240,9 +298,11 @@ const API_SERVICE = {
   /**
    * Update session
    */
-  async updateSession(sessionId, data) {
+  async updateSession(sessionId, data, { approvalToken = null, requiresParent = false } = {}) {
     return await this.request(`/api/sessions/${sessionId}`, {
       method: 'PUT',
+      approvalToken,
+      requiresParent,
       body: JSON.stringify(data)
     });
   },
@@ -250,9 +310,10 @@ const API_SERVICE = {
   /**
    * Delete session
    */
-  async deleteSession(sessionId) {
+  async deleteSession(sessionId, { requiresParent = false } = {}) {
     return await this.request(`/api/sessions/${sessionId}`, {
-      method: 'DELETE'
+      method: 'DELETE',
+      requiresParent
     });
   },
 
@@ -261,7 +322,8 @@ const API_SERVICE = {
    */
   async deleteAllSessions(childId) {
     return await this.request(`/api/sessions?child_id=${childId}`, {
-      method: 'DELETE'
+      method: 'DELETE',
+      requiresParent: true
     });
   },
 
@@ -269,7 +331,9 @@ const API_SERVICE = {
    * Get statistics
    */
   async getStats(childId, days = 30) {
-    return await this.request(`/api/stats?child_id=${childId}&days=${days}`);
+    return await this.request(`/api/stats?child_id=${childId}&days=${days}`, {
+      requiresParent: true
+    });
   },
 
   /**

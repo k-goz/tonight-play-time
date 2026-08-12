@@ -32,6 +32,30 @@ async function api(pathname, options = {}) {
   return { response, body };
 }
 
+async function parentHeaders(headers, pin) {
+  const grant = await api('/api/settings/verify-pin', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ parent_pin: pin, purpose: 'manage' })
+  });
+  assert.equal(grant.response.status, 200);
+  assert.equal(grant.body.valid, true);
+  assert.match(grant.body.parent_token, /^[a-f0-9]{64}$/);
+  return { ...headers, 'X-Parent-Token': grant.body.parent_token };
+}
+
+async function approvalToken(headers, pin) {
+  const grant = await api('/api/settings/verify-pin', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ parent_pin: pin, purpose: 'approve' })
+  });
+  assert.equal(grant.response.status, 200);
+  assert.equal(grant.body.valid, true);
+  assert.match(grant.body.approval_token, /^[a-f0-9]{64}$/);
+  return grant.body.approval_token;
+}
+
 async function runSql(sql, params = []) {
   await new Promise((resolve, reject) => {
     db.run(sql, params, (error) => error ? reject(error) : resolve());
@@ -84,10 +108,14 @@ test('authenticated session lifecycle persists and rejects unapproved fields', a
     body: JSON.stringify({ parent_pin: '1234' })
   });
   assert.equal(defaultPin.body.valid, true);
+  const initialParentHeaders = {
+    ...headers,
+    'X-Parent-Token': defaultPin.body.parent_token
+  };
 
   const savedSettings = await api('/api/settings', {
     method: 'PUT',
-    headers,
+    headers: initialParentHeaders,
     body: JSON.stringify({ bedtime: '22:00', weekend_bedtime: '22:30', parent_pin: '4321' })
   });
   assert.equal(savedSettings.response.status, 200);
@@ -142,7 +170,10 @@ test('authenticated session lifecycle persists and rejects unapproved fields', a
 
   const completed = await api(`/api/sessions/${created.body.id}`, {
     method: 'PUT',
-    headers,
+    headers: {
+      ...headers,
+      'X-Parent-Approval': await approvalToken(headers, '4321')
+    },
     body: JSON.stringify({
       state: 'completed',
       homework_seconds: 600,
@@ -202,9 +233,11 @@ test('legacy default PIN can initialize while a custom PIN is preserved', async 
   assert.equal(initialSettings.body.initialized, false);
   assert.equal(initialSettings.body.pin_configured, true);
 
+  const legacyParentHeaders = await parentHeaders(headers, '9876');
+
   const bedtimeOnly = await api('/api/settings', {
     method: 'PUT',
-    headers,
+    headers: legacyParentHeaders,
     body: JSON.stringify({ bedtime: '21:45' })
   });
   assert.equal(bedtimeOnly.response.status, 200);
@@ -224,6 +257,7 @@ test('local record import is idempotent and never overwrites completed server da
     body: JSON.stringify({ username: 'test_child', password: 'test1234' })
   });
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${login.body.access_token}` };
+  const importParentHeaders = await parentHeaders(headers, '4321');
   const localRecord = {
     date: '2026-08-11',
     bedtime: '22:00',
@@ -242,14 +276,14 @@ test('local record import is idempotent and never overwrites completed server da
 
   const firstImport = await api('/api/sessions/import', {
     method: 'POST',
-    headers,
+    headers: importParentHeaders,
     body: JSON.stringify({ records: [localRecord] })
   });
   assert.deepEqual(firstImport.body, { imported: 1, skipped: 0 });
 
   const repeatedImport = await api('/api/sessions/import', {
     method: 'POST',
-    headers,
+    headers: importParentHeaders,
     body: JSON.stringify({ records: [{ ...localRecord, homework_seconds: 9999 }] })
   });
   assert.deepEqual(repeatedImport.body, { imported: 0, skipped: 1 });
@@ -276,7 +310,7 @@ test('local record import is idempotent and never overwrites completed server da
   };
   const upgradedImport = await api('/api/sessions/import', {
     method: 'POST',
-    headers,
+    headers: importParentHeaders,
     body: JSON.stringify({ records: [completedLocalRecord] })
   });
   assert.deepEqual(upgradedImport.body, { imported: 1, skipped: 0 });
@@ -304,6 +338,7 @@ test('child profiles isolate sessions, keep separate rules, and archive without 
     body: JSON.stringify({ username: 'test_child', password: 'test1234' })
   });
   const headers = { 'Content-Type': 'application/json', Authorization: `Bearer ${login.body.access_token}` };
+  const familyParentHeaders = await parentHeaders(headers, '4321');
 
   const initialChildren = await api('/api/children', { headers });
   assert.equal(initialChildren.response.status, 200);
@@ -314,7 +349,7 @@ test('child profiles isolate sessions, keep separate rules, and archive without 
 
   const secondChildResponse = await api('/api/children', {
     method: 'POST',
-    headers,
+    headers: familyParentHeaders,
     body: JSON.stringify({
       name: '小太阳',
       avatar: '☀️',
@@ -347,7 +382,7 @@ test('child profiles isolate sessions, keep separate rules, and archive without 
 
   const updatedSettings = await api('/api/settings', {
     method: 'PUT',
-    headers,
+    headers: familyParentHeaders,
     body: JSON.stringify({
       child_id: secondChild.id,
       bedtime: '20:30',
@@ -367,40 +402,39 @@ test('child profiles isolate sessions, keep separate rules, and archive without 
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ username: 'other_child', password: 'test1234' })
   });
+  const otherHeaders = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${otherLogin.body.access_token}`
+  };
+  const otherParentHeaders = await parentHeaders(otherHeaders, '1234');
   const forbiddenChild = await api(`/api/sessions?child_id=${secondChild.id}`, {
-    headers: { Authorization: `Bearer ${otherLogin.body.access_token}` }
+    headers: otherHeaders
   });
   assert.equal(forbiddenChild.response.status, 404);
   const forbiddenChildUpdate = await api(`/api/children/${secondChild.id}`, {
     method: 'PUT',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${otherLogin.body.access_token}`
-    },
+    headers: otherParentHeaders,
     body: JSON.stringify({ name: '不应成功' })
   });
   assert.equal(forbiddenChildUpdate.response.status, 404);
 
   const forbiddenArchive = await api(`/api/children/${secondChild.id}/archive`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${otherLogin.body.access_token}`
-    },
+    headers: otherParentHeaders,
     body: JSON.stringify({ archived: true })
   });
   assert.equal(forbiddenArchive.response.status, 404);
 
   const defaultArchive = await api(`/api/children/${firstChild.id}/archive`, {
     method: 'POST',
-    headers,
+    headers: familyParentHeaders,
     body: JSON.stringify({ archived: true })
   });
   assert.equal(defaultArchive.response.status, 400);
 
   const archivedSecond = await api(`/api/children/${secondChild.id}/archive`, {
     method: 'POST',
-    headers,
+    headers: familyParentHeaders,
     body: JSON.stringify({ archived: true })
   });
   assert.equal(archivedSecond.response.status, 200);
@@ -417,7 +451,7 @@ test('child profiles isolate sessions, keep separate rules, and archive without 
 
   const restoredSecond = await api(`/api/children/${secondChild.id}/archive`, {
     method: 'POST',
-    headers,
+    headers: familyParentHeaders,
     body: JSON.stringify({ archived: false })
   });
   assert.equal(restoredSecond.response.status, 200);
@@ -427,11 +461,111 @@ test('child profiles isolate sessions, keep separate rules, and archive without 
 
   const deletedSecond = await api(`/api/sessions?child_id=${secondChild.id}`, {
     method: 'DELETE',
-    headers
+    headers: familyParentHeaders
   });
   assert.equal(deletedSecond.body.deleted, 1);
   const firstAfterDelete = await api(`/api/sessions?child_id=${firstChild.id}&limit=100`, { headers });
   assert.equal(firstAfterDelete.body.some(session => session.date === '2026-08-08'), true);
+});
+
+test('parent grants enforce scope, revocation, and one-time completion approval', async () => {
+  const registration = await api('/api/auth/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'permission_family', nickname: '小盾牌', password: 'test1234' })
+  });
+  assert.equal(registration.response.status, 201);
+  const headers = {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${registration.body.access_token}`
+  };
+
+  const unapprovedChild = await api('/api/children', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name: '不能添加', bedtime: '21:00' })
+  });
+  assert.equal(unapprovedChild.response.status, 403);
+  const unapprovedStats = await api('/api/stats', { headers });
+  assert.equal(unapprovedStats.response.status, 403);
+
+  const oneTimeApproval = await approvalToken(headers, '1234');
+  const wrongScope = await api('/api/children', {
+    method: 'POST',
+    headers: { ...headers, 'X-Parent-Token': oneTimeApproval },
+    body: JSON.stringify({ name: '仍不能添加', bedtime: '21:00' })
+  });
+  assert.equal(wrongScope.response.status, 403);
+
+  const managedHeaders = await parentHeaders(headers, '1234');
+  const approvedChild = await api('/api/children', {
+    method: 'POST',
+    headers: managedHeaders,
+    body: JSON.stringify({ name: '家长添加', bedtime: '21:00', weekend_bedtime: '22:00' })
+  });
+  assert.equal(approvedChild.response.status, 201);
+
+  const locked = await api('/api/settings/parent-access', {
+    method: 'DELETE',
+    headers: managedHeaders
+  });
+  assert.equal(locked.response.status, 200);
+  const revokedGrant = await api('/api/children', {
+    method: 'POST',
+    headers: managedHeaders,
+    body: JSON.stringify({ name: '授权已撤销', bedtime: '21:00' })
+  });
+  assert.equal(revokedGrant.response.status, 403);
+
+  const firstSession = await api('/api/sessions', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ date: '2026-08-06', bedtime: '21:00' })
+  });
+  const completionWithoutApproval = await api(`/api/sessions/${firstSession.body.id}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ state: 'completed', completed: true })
+  });
+  assert.equal(completionWithoutApproval.response.status, 403);
+
+  const approvedCompletion = await api(`/api/sessions/${firstSession.body.id}`, {
+    method: 'PUT',
+    headers: { ...headers, 'X-Parent-Approval': oneTimeApproval },
+    body: JSON.stringify({ state: 'completed', completed: true, homework_done: true })
+  });
+  assert.equal(approvedCompletion.response.status, 200);
+  assert.equal(approvedCompletion.body.completed, 1);
+  const completedDelete = await api(`/api/sessions/${firstSession.body.id}`, {
+    method: 'DELETE',
+    headers
+  });
+  assert.equal(completedDelete.response.status, 403);
+
+  const rewardChoice = await api(`/api/sessions/${firstSession.body.id}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ reward_choice: '听故事' })
+  });
+  assert.equal(rewardChoice.response.status, 200);
+  const completedRewrite = await api(`/api/sessions/${firstSession.body.id}`, {
+    method: 'PUT',
+    headers,
+    body: JSON.stringify({ title: '不能改写' })
+  });
+  assert.equal(completedRewrite.response.status, 403);
+
+  const secondSession = await api('/api/sessions', {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ date: '2026-08-07', bedtime: '21:00' })
+  });
+  const reusedApproval = await api(`/api/sessions/${secondSession.body.id}`, {
+    method: 'PUT',
+    headers: { ...headers, 'X-Parent-Approval': oneTimeApproval },
+    body: JSON.stringify({ state: 'completed', completed: true })
+  });
+  assert.equal(reusedApproval.response.status, 403);
 });
 
 test('bulk record deletion is account-scoped and keeps the account', async () => {
@@ -447,6 +581,7 @@ test('bulk record deletion is account-scoped and keeps the account', async () =>
   });
   const firstHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${firstLogin.body.access_token}` };
   const secondHeaders = { 'Content-Type': 'application/json', Authorization: `Bearer ${secondLogin.body.access_token}` };
+  const firstParentHeaders = await parentHeaders(firstHeaders, '4321');
 
   await api('/api/sessions', {
     method: 'POST',
@@ -455,7 +590,7 @@ test('bulk record deletion is account-scoped and keeps the account', async () =>
   });
 
   const firstBeforeDelete = await api('/api/sessions?limit=100', { headers: firstHeaders });
-  const deleted = await api('/api/sessions', { method: 'DELETE', headers: firstHeaders });
+  const deleted = await api('/api/sessions', { method: 'DELETE', headers: firstParentHeaders });
   assert.equal(deleted.response.status, 200);
   assert.equal(deleted.body.deleted, firstBeforeDelete.body.length);
 
